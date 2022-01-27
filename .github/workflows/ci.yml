@@ -1,6 +1,10 @@
 name: Continuous Integration
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - master
+  pull_request:
 
 jobs:
   build-artifacts:
@@ -31,7 +35,8 @@ jobs:
       
       - name: Create Version Name
         run: |
-          export VERSION_NAME="${{ steps.branch-name.outputs.current_branch }}-$(git describe)"
+          export VERSION_NAME="${{ steps.branch-name.outputs.current_branch }}-"
+          export VERSION_NAME="${VERSION_NAME}-$(git describe)"
           echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
 
       - name: Build
