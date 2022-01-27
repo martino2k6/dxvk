@@ -1,0 +1,32 @@
+name: Continuous Integration
+on: [push, pull_request]
+jobs:
+  Build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Install Dependencies
+        run: |
+          brew install coreutils
+          brew install meson
+          brew install mingw-w64
+          brew install glslang
+
+      - name: Get Branch Name
+        id: branch-name
+        uses: tj-actions/branch-names@v5
+
+      - name: Build
+        run: ./package-release.sh "${{ steps.branch-name.outputs.current_branch }}-$(git describe)" build/ --no-package
+
+      - name: Upload Build
+        uses: actions/upload-artifact@v2
+        with:
+          name: build
+          path: |
+            build/
+          if-no-files-found: error
