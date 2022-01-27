@@ -12,6 +12,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Git Fetch
+        run: git fetch --force --tags
+
       - name: Setup Problem Matcher
         uses: Joshua-Ashton/gcc-problem-matcher@v1
 
@@ -25,12 +28,14 @@ jobs:
       - name: Get Branch Name
         id: branch-name
         uses: tj-actions/branch-names@v5
-
-      - name: Build
+      
+      - name: Create Version Name
         run: |
           export VERSION_NAME="${{ steps.branch-name.outputs.current_branch }}-$(git describe)"
-          ./package-release.sh "${VERSION_NAME}" build --no-package
           echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
+
+      - name: Build
+        run: ./package-release.sh "${env.VERSION_NAME}" build --no-package
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v2
