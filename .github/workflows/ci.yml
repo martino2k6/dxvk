@@ -30,22 +30,22 @@ jobs:
           brew install glslang
 
       - name: Get Branch Name
-        id: branch-name
+        id: branch_name
         uses: tj-actions/branch-names@v5
       
       - name: Create Version Name
-        id: version-name
+        id: version_name
         run: |
-          export VERSION_NAME="${{ steps.branch-name.outputs.current_branch }}"
+          export VERSION_NAME="${{ steps.branch_name.outputs.current_branch }}"
           export VERSION_NAME="${VERSION_NAME}-$(git describe)"
           echo "::set-output name=name::${VERSION_NAME}\n"
 
       - name: Build
-        run: ./package-release.sh ${{ steps.version-name.outputs.name }} build --no-package
+        run: ./package-release.sh ${{ steps.version_name.outputs.name }} build --no-package
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: dxvk-${{ steps.version-name.outputs.name }}
-          path: build/dxvk-${{ steps.version-name.outputs.name }}
+          name: dxvk-${{ steps.version_name.outputs.name }}
+          path: build/dxvk-${{ steps.version_name.outputs.name }}
           if-no-files-found: error
