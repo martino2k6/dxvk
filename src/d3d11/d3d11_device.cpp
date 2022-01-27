@@ -800,7 +800,7 @@ namespace dxvk {
     D3D11CommonShader module;
 
     if (!m_dxvkDevice->features().extTransformFeedback.transformFeedback) {
-      Logger::err("D3D11: CreateGeometryShaderWithStreamOutput: Transform feedback not supported by device");
+      Logger::err("D3D11: CreateGeometryShaderWithStreamOutput: Transform feedback not supported");
       return S_OK;
     }
 
