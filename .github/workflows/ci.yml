@@ -1,13 +1,19 @@
 name: Continuous Integration
+
 on: [push, pull_request]
+
 jobs:
-  Build:
+  build-artifacts:
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v2
         with:
           fetch-depth: 0
+
+      - name: Setup Problem Matcher
+        uses: Joshua-Ashton/gcc-problem-matcher@v1
 
       - name: Install Dependencies
         run: |
@@ -21,12 +27,14 @@ jobs:
         uses: tj-actions/branch-names@v5
 
       - name: Build
-        run: ./package-release.sh "${{ steps.branch-name.outputs.current_branch }}-$(git describe)" build/ --no-package
+        run: |
+          export VERSION_NAME="${{ steps.branch-name.outputs.current_branch }}-$(git describe)"
+          ./package-release.sh "${VERSION_NAME}" build --no-package
+          echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
 
-      - name: Upload Build
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: build
-          path: |
-            build/
+          name: dxvk-${{ env.VERSION_NAME }}
+          path: build/dxvk-${{ env.VERSION_NAME }}
           if-no-files-found: error
