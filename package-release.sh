@@ -89,8 +89,6 @@ function package {
 }
 
 build_arch 64
-build_arch 32
-build_script
 
 if [ $opt_nopackage -eq 0 ]; then
   package
