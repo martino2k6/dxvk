@@ -1,15 +1,15 @@
 # DXVK
 
-A Vulkan-based translation layer for Direct3D 9/10/11 which allows running 3D applications on Linux using Wine.
+A Vulkan-based translation layer for Direct3D 9/10/11 which allows running 3D applications on macOS using Wine.
 
-For the current status of the project, please refer to the [project wiki](https://github.com/doitsujin/dxvk/wiki).
+For the current status of the project, please refer to the [project wiki](https://github.com/martino2k6/dxvk/wiki).
 
-The most recent development builds can be found [here](https://github.com/doitsujin/dxvk/actions/workflows/artifacts.yml?query=branch%3Amaster).
+The most recent development builds can be found [here](https://github.com/martino2k6/dxvk/actions/workflows/ci.yml?query=branch%3Amaster).
 
-Release builds can be found [here](https://github.com/doitsujin/dxvk/releases).
+Release builds can be found [here](https://github.com/martino2k6/dxvk/releases).
 
 ## How to use
-In order to install a DXVK package obtained from the [release](https://github.com/doitsujin/dxvk/releases) page into a given wine prefix, run the following commands from within the DXVK directory:
+In order to install a DXVK package obtained from the [release](https://github.com/martino2k6/dxvk/releases) page into a given wine prefix, run the following commands from within the DXVK directory:
 
 ```
 export WINEPREFIX=/path/to/.wine-prefix
