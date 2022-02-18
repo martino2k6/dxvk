@@ -241,40 +241,6 @@ namespace dxvk {
             VkClearColorValue     value);
     
     /**
-     * \brief Clears subresources of a color image
-     * 
-     * \param [in] image The image to clear
-     * \param [in] value Clear value
-     * \param [in] subresources Subresources to clear
-     */
-    void clearColorImage(
-      const Rc<DxvkImage>&            image,
-      const VkClearColorValue&        value,
-      const VkImageSubresourceRange&  subresources);
-    
-    /**
-     * \brief Clears subresources of a depth-stencil image
-     * 
-     * \param [in] image The image to clear
-     * \param [in] value Clear value
-     * \param [in] subresources Subresources to clear
-     */
-    void clearDepthStencilImage(
-      const Rc<DxvkImage>&            image,
-      const VkClearDepthStencilValue& value,
-      const VkImageSubresourceRange&  subresources);
-    
-    /**
-     * \brief Clears a compressed image to black
-     *
-     * \param [in] image The image to clear
-     * \param [in] subresources Subresources to clear
-     */
-    void clearCompressedColorImage(
-      const Rc<DxvkImage>&            image,
-      const VkImageSubresourceRange&  subresources);
-    
-    /**
      * \brief Clears an active render target
      * 
      * \param [in] imageView Render target view to clear
@@ -672,12 +638,23 @@ namespace dxvk {
     void generateMipmaps(
       const Rc<DxvkImageView>&        imageView,
             VkFilter                  filter);
-    
+
     /**
-     * \brief Initializes or invalidates an image
+     * \brief Initializes a buffer
+     *
+     * Clears the given buffer to zero. Only safe to call
+     * if the buffer is not currently in use by the GPU.
+     * \param [in] buffer Buffer to clear
+     */
+    void initBuffer(
+      const Rc<DxvkBuffer>&           buffer);
+
+    /**
+     * \brief Initializes an image
      * 
-     * Sets up the image layout for future operations
-     * while discarding any previous contents.
+     * Transitions the image into its default layout, and clears
+     * it to black unless the initial layout is preinitialized.
+     * Only safe to call if the image is not in use by the GPU.
      * \param [in] image The image to initialize
      * \param [in] subresources Image subresources
      * \param [in] initialLayout Initial image layout
@@ -1320,13 +1297,6 @@ namespace dxvk {
             VkPipelineStageFlags      dstStages,
             VkAccessFlags             dstAccess);
     
-    void initializeImage(
-      const Rc<DxvkImage>&            image,
-      const VkImageSubresourceRange&  subresources,
-            VkImageLayout             dstLayout,
-            VkPipelineStageFlags      dstStages,
-            VkAccessFlags             dstAccess);
-
     VkDescriptorSet allocateDescriptorSet(
             VkDescriptorSetLayout     layout);
 
