@@ -35,6 +35,7 @@ namespace dxvk {
      * multiple times                             */
     { R"(\\EvilWithin(Demo)?\.exe$)", {{
       { "d3d11.dcSingleUseMode",            "False" },
+      { "d3d11.cachedDynamicResources",     "vi"   },
     }} },
     /* Far Cry 3: Assumes clear(0.5) on an UNORM  *
      * format to result in 128 on AMD and 127 on  *
@@ -67,6 +68,10 @@ namespace dxvk {
     /* Anno 2205: Random crashes with state cache */
     { R"(\\anno2205\.exe$)", {{
       { "dxvk.enableStateCache",            "False" },
+    }} },
+    /* Anno 1800: Poor performance without this   */
+    { R"(\\Anno1800\.exe$)", {{
+      { "d3d11.cachedDynamicResources",     "c"    },
     }} },
     /* Fifa '19+: Binds typed buffer SRV to shader *
      * that expects raw/structured buffer SRV     */
