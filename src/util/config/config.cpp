@@ -265,6 +265,7 @@ namespace dxvk {
       { "d3d11.ignoreGraphicsBarriers",     "True" },
       { "d3d11.relaxedBarriers",            "True" },
       { "dxgi.nvapiHack",                   "False" },
+      { "dxgi.maxFrameLatency",             "1"    },
     }} },
     /* AoE 2 DE - runs poorly for some users      */
     { R"(\\AoE2DE_s\.exe$)", {{
@@ -273,6 +274,10 @@ namespace dxvk {
     /* Total War: Warhammer III                   */
     { R"(\\Warhammer3\.exe$)", {{
       { "d3d11.maxDynamicImageBufferSize",  "4096" },
+    }} },
+    /* Assassin's Creed 3 and 4                   */
+    { R"(\\ac(3|4bf)[sm]p\.exe$)", {{
+      { "d3d11.cachedDynamicResources",     "a"    },
     }} },
 
     /**********************************************/
