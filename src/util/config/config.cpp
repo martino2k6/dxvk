@@ -52,6 +52,7 @@ namespace dxvk {
      * after creating the DXGI swap chain         */
     { R"(\\Frostpunk\.exe$)", {{
       { "dxgi.deferSurfaceCreation",        "True" },
+      { "d3d11.cachedDynamicResources",     "c" },
     }} },
     /* Nioh: See Frostpunk, apparently?           */
     { R"(\\nioh\.exe$)", {{
@@ -278,6 +279,10 @@ namespace dxvk {
     /* Assassin's Creed 3 and 4                   */
     { R"(\\ac(3|4bf)[sm]p\.exe$)", {{
       { "d3d11.cachedDynamicResources",     "a"    },
+    }} },
+    /* Stranger of Paradise - FF Origin           */
+    { R"(\\SOPFFO\.exe$)", {{
+      { "d3d9.deferSurfaceCreation",        "True" },
     }} },
 
     /**********************************************/
