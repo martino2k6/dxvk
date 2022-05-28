@@ -287,6 +287,10 @@ namespace dxvk {
     /* Stranger of Paradise - FF Origin           */
     { R"(\\SOPFFO\.exe$)", {{
       { "d3d9.deferSurfaceCreation",        "True" },
+    /* Small Radios Big Televisions               */
+    }} },
+    { R"(\\SRBT\.exe$)", {{
+      { "d3d9.deferSurfaceCreation",        "True" },
     }} },
 
     /**********************************************/
@@ -526,6 +530,14 @@ namespace dxvk {
      * declares a 3d texture.                   */
     { R"(\\SWTFU2\.exe$)", {{
       { "d3d9.forceSamplerTypeSpecConstants",  "True" },
+    }} },
+    /* Majesty 2 (Collection)                   *
+     * Crashes on UMA without a memory limit,   *
+     * since the game(s) will allocate all      *
+     * available VRAM on startup.               */
+    { R"(\\Majesty2\.exe$)", {{
+      { "d3d9.memoryTrackTest",             "True" },
+      { "d3d9.maxAvailableMemory",          "2048" },
     }} },
   }};
 
