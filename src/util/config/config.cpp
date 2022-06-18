@@ -321,7 +321,7 @@ namespace dxvk {
     }} },
     /* Sonic Adventure 2                          */
     { R"(\\Sonic Adventure 2\\(launcher|sonic2app)\.exe$)", {{
-      { "d3d9.floatEmulation",              "False" },
+      { "d3d9.floatEmulation",              "Strict" },
     }} },
     /* The Sims 2,
        Body Shop,
@@ -524,12 +524,27 @@ namespace dxvk {
     { R"(\\limbo\.exe$)", {{
       { "d3d9.maxFrameRate",                "60" },
     }} },
+    /* Warhammer: Return of Reckoning Launcher
+       Forcing SM1 fixes a black window otherwise caused by
+       the lack of support for partial presentation */
+    { R"(\\RoRLauncher\.exe$)", {{
+      { "d3d9.shaderModel",                 "1" },
+    }} },
+    /* Halo CE SPV3 launcher
+       Same issue as Warhammer: RoR above       */
+    { R"(\\spv3\.exe$)", {{
+      { "d3d9.shaderModel",                 "1" },
+    }} },
     /* Star Wars The Force Unleashed 2          *
      * Black particles because it tries to bind *
      * a 2D texture for a shader that           *
      * declares a 3d texture.                   */
     { R"(\\SWTFU2\.exe$)", {{
       { "d3d9.forceSamplerTypeSpecConstants",  "True" },
+    }} },
+    /* Scrapland (Remastered)                   */
+    { R"(\\Scrap\.exe$)", {{
+      { "d3d9.deferSurfaceCreation",        "True" },
     }} },
     /* Majesty 2 (Collection)                   *
      * Crashes on UMA without a memory limit,   *
@@ -538,6 +553,21 @@ namespace dxvk {
     { R"(\\Majesty2\.exe$)", {{
       { "d3d9.memoryTrackTest",             "True" },
       { "d3d9.maxAvailableMemory",          "2048" },
+    }} },
+    /* Myst V End of Ages                             
+       Game has white textures on amd radv.
+       Expects Nvidia, Intel or ATI VendorId.
+       "Radeon" in gpu description also works   */
+    { R"(\\eoa\.exe$)", {{
+      { "d3d9.customVendorId",              "10de" },
+    }} },
+    /* Supreme Commander.                       */
+    { R"(\\SupremeCommander\.exe$)", {{
+      { "d3d9.floatEmulation",        "Strict" },
+    }} },
+    /* Star Wars The Old Republic */
+    { R"(\\swtor\.exe$)", {{
+      { "d3d9.forceSamplerTypeSpecConstants", "True" },
     }} },
   }};
 
