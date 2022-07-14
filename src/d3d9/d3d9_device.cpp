@@ -1066,7 +1066,7 @@ namespace dxvk {
           ctx->resolveDepthStencilImage(
             cDstImage, cSrcImage, cRegion,
             VK_RESOLVE_MODE_AVERAGE_BIT_KHR,
-            VK_RESOLVE_MODE_AVERAGE_BIT_KHR);
+            VK_RESOLVE_MODE_SAMPLE_ZERO_BIT_KHR);
         }
       });
     };
@@ -3947,6 +3947,8 @@ namespace dxvk {
       enabled.extCustomBorderColor.customBorderColorWithoutFormat = VK_TRUE;
     }
 
+    enabled.extNonSeamlessCubeMap.nonSeamlessCubeMap = supported.extNonSeamlessCubeMap.nonSeamlessCubeMap;
+
     return enabled;
   }
 
@@ -5952,6 +5954,7 @@ namespace dxvk {
       info.mipmapLodMin   = mipFilter.MipsEnabled ? float(cKey.MaxMipLevel) : 0;
       info.mipmapLodMax   = mipFilter.MipsEnabled ? FLT_MAX                 : 0;
       info.usePixelCoord  = VK_FALSE;
+      info.nonSeamless    = m_dxvkDevice->features().extNonSeamlessCubeMap.nonSeamlessCubeMap && !m_d3d9Options.seamlessCubes;
 
       DecodeD3DCOLOR(cKey.BorderColor, info.borderColor.float32);
 
@@ -6955,7 +6958,7 @@ namespace dxvk {
     const D3D9_COMMON_TEXTURE_DESC* dstDesc = dstTextureInfo->Desc();
 
     VkSampleCountFlagBits dstSampleCount;
-    DecodeMultiSampleType(dstDesc->MultiSample, dstDesc->MultisampleQuality, &dstSampleCount);
+    DecodeMultiSampleType(m_dxvkDevice, dstDesc->MultiSample, dstDesc->MultisampleQuality, &dstSampleCount);
 
     if (unlikely(dstSampleCount != VK_SAMPLE_COUNT_1_BIT)) {
       Logger::warn("D3D9DeviceEx::ResolveZ: dstSampleCount != 1. Discarding.");
@@ -6987,7 +6990,7 @@ namespace dxvk {
       srcSubresource.arrayLayer, 1 };
 
     VkSampleCountFlagBits srcSampleCount;
-    DecodeMultiSampleType(srcDesc->MultiSample, srcDesc->MultisampleQuality, &srcSampleCount);
+    DecodeMultiSampleType(m_dxvkDevice, srcDesc->MultiSample, srcDesc->MultisampleQuality, &srcSampleCount);
 
     if (srcSampleCount == VK_SAMPLE_COUNT_1_BIT) {
       EmitCs([

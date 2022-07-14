@@ -292,6 +292,19 @@ namespace dxvk {
     { R"(\\SRBT\.exe$)", {{
       { "d3d9.deferSurfaceCreation",        "True" },
     }} },
+    /* A Way Out: fix for stuttering and low fps  */
+    { R"(\\AWayOut(_friend)?\.exe$)", {{
+      { "dxgi.maxFrameLatency",                "1" },
+    }} },
+    /* Garden Warfare 2
+       Won't start on amd Id without atiadlxx     */
+    { R"(\\GW2.Main_Win64_Retail\.exe$)", {{
+      { "dxgi.customVendorId",           "10de"   },
+    }} },
+    /* DayZ */
+    { R"(\\DayZ_x64\.exe$)", {{
+      { "d3d11.cachedDynamicResources",     "cr" },
+    }} },
 
     /**********************************************/
     /* D3D9 GAMES                                 */
@@ -338,9 +351,13 @@ namespace dxvk {
       { "d3d9.memoryTrackTest",             "True" },
     }} },
     /* Dead Space uses the a NULL render target instead
-       of a 1x1 one if DF24 is NOT supported      */
+       of a 1x1 one if DF24 is NOT supported     
+       Mouse and physics issues above 60 FPS
+       Built-in Vsync Locks the game to 30 FPS    */
     { R"(\\Dead Space\.exe$)", {{
       { "d3d9.supportDFFormats",                 "False" },
+      { "d3d9.maxFrameRate",                     "60" },
+      { "d3d9.presentInterval",                  "1" },
     }} },
     /* Halo CE/HaloPC                             */
     { R"(\\halo(ce)?\.exe$)", {{
@@ -561,13 +578,28 @@ namespace dxvk {
     { R"(\\eoa\.exe$)", {{
       { "d3d9.customVendorId",              "10de" },
     }} },
-    /* Supreme Commander.                       */
-    { R"(\\SupremeCommander\.exe$)", {{
-      { "d3d9.floatEmulation",        "Strict" },
+    /* Beyond Good And Evil                     *
+     * Fixes missing sun and light shafts       */
+    { R"(\\BGE\.exe$)", {{
+      { "d3d9.allowDoNotWait",              "False" },
+    }} },
+    /* Supreme Commander & Forged Alliance Forever */
+    { R"(\\(SupremeCommander|ForgedAlliance)\.exe$)", {{
+      { "d3d9.floatEmulation",            "Strict" },
     }} },
     /* Star Wars The Old Republic */
     { R"(\\swtor\.exe$)", {{
       { "d3d9.forceSamplerTypeSpecConstants", "True" },
+    }} },
+    /* Bionic Commando                          
+       Physics break at high fps               */
+    { R"(\\bionic_commando\.exe$)", {{
+      { "d3d9.maxFrameRate",                "60" },
+    }} },
+    /* Port Royale 3                            *
+     * Fixes infinite loading screens           */
+    { R"(\\PortRoyale3\.exe$)", {{
+      { "d3d9.allowDoNotWait",           "False" },
     }} },
   }};
 
@@ -768,6 +800,10 @@ namespace dxvk {
     if (appConfig != g_appDefaults.end()) {
       // Inform the user that we loaded a default config
       Logger::info(str::format("Found built-in config:"));
+
+      for (auto& pair : appConfig->second.m_options)
+        Logger::info(str::format("  ", pair.first, " = ", pair.second));
+
       return appConfig->second;
     }
 
