@@ -305,6 +305,12 @@ namespace dxvk {
     { R"(\\DayZ_x64\.exe$)", {{
       { "d3d11.cachedDynamicResources",     "cr" },
     }} },
+    /* Stray - writes to the same UAV every draw, *
+     * presumably for culling, which doesn't play *
+     * nicely with D3D11 without vendor libraries */
+    { R"(\\Stray-Win64-Shipping\.exe$)", {{
+      { "d3d11.ignoreGraphicsBarriers",     "True" },
+    }} },
 
     /**********************************************/
     /* D3D9 GAMES                                 */
@@ -600,6 +606,20 @@ namespace dxvk {
      * Fixes infinite loading screens           */
     { R"(\\PortRoyale3\.exe$)", {{
       { "d3d9.allowDoNotWait",           "False" },
+    }} },
+    /* Need For Speed 3 modern patch            */
+    { R"(\\nfs3\.exe$)", {{
+      { "d3d9.enableDialogMode",          "True" },
+    }} },
+    /* Ninja Blade                              *
+     * Transparent main character on Nvidia     */
+    { R"(\\NinjaBlade\.exe$)", {{
+      { "d3d9.alphaTestWiggleRoom",       "True" },
+    }} },
+    /* YS Origin                                *
+     * Helps very bad frametimes in some areas  */
+    { R"(\\yso_win\.exe$)", {{
+      { "d3d9.maxFrameLatency",              "1" },
     }} },
   }};
 

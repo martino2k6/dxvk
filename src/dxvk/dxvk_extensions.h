@@ -300,10 +300,12 @@ namespace dxvk {
     DxvkExt khrDrawIndirectCount              = { VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,                DxvkExtMode::Optional };
     DxvkExt khrDriverProperties               = { VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME,                  DxvkExtMode::Optional };
     DxvkExt khrExternalMemoryWin32            = { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,              DxvkExtMode::Optional };
+    DxvkExt khrExternalSemaphoreWin32         = { VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,           DxvkExtMode::Optional };
     DxvkExt khrImageFormatList                = { VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,                  DxvkExtMode::Required };
     DxvkExt khrSamplerMirrorClampToEdge       = { VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,       DxvkExtMode::Optional };
     DxvkExt khrShaderFloatControls            = { VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,              DxvkExtMode::Optional };
     DxvkExt khrSwapchain                      = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,                          DxvkExtMode::Required };
+    DxvkExt khrTimelineSemaphore              = { VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,                 DxvkExtMode::Optional };
     DxvkExt nvxBinaryImport                   = { VK_NVX_BINARY_IMPORT_EXTENSION_NAME,                      DxvkExtMode::Disabled };
     DxvkExt nvxImageViewHandle                = { VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME,                  DxvkExtMode::Disabled };
   };

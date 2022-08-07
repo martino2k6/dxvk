@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - 1.10.x
   pull_request:
 
 jobs:
@@ -55,8 +56,8 @@ jobs:
       
       - name: Build Async
         run: |
-          curl -O https://raw.githubusercontent.com/Sporif/dxvk-async/master/dxvk-async.patch
-          patch -p1 < dxvk-async.patch
+          curl -O https://raw.githubusercontent.com/Sporif/dxvk-async/master/dxvk-async-af418dc.patch
+          patch -p1 < dxvk-async-af418dc.patch
           echo "dxvk.enableAsync = true" >> dxvk.conf
           ./package-release.sh "${{ steps.version_name.outputs.name }}-async" build --no-package
 

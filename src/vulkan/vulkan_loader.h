@@ -85,6 +85,7 @@ namespace dxvk::vk {
     VULKAN_FN(vkDestroyInstance);
     VULKAN_FN(vkEnumerateDeviceExtensionProperties);
     VULKAN_FN(vkEnumeratePhysicalDevices);
+    VULKAN_FN(vkGetPhysicalDeviceExternalSemaphoreProperties);
     VULKAN_FN(vkGetPhysicalDeviceFeatures);
     VULKAN_FN(vkGetPhysicalDeviceFeatures2);
     VULKAN_FN(vkGetPhysicalDeviceFormatProperties);
@@ -309,6 +310,12 @@ namespace dxvk::vk {
     VULKAN_FN(vkQueuePresentKHR);
     #endif
 
+    #ifdef VK_KHR_timeline_semaphore
+    VULKAN_FN(vkGetSemaphoreCounterValueKHR);
+    VULKAN_FN(vkSignalSemaphoreKHR);
+    VULKAN_FN(vkWaitSemaphoresKHR);
+    #endif
+
     #ifdef VK_EXT_conditional_rendering
     VULKAN_FN(vkCmdBeginConditionalRenderingEXT);
     VULKAN_FN(vkCmdEndConditionalRenderingEXT);
@@ -368,6 +375,11 @@ namespace dxvk::vk {
     #ifdef VK_KHR_external_memory_win32
     VULKAN_FN(vkGetMemoryWin32HandleKHR);
     VULKAN_FN(vkGetMemoryWin32HandlePropertiesKHR);
+    #endif
+
+    #ifdef VK_KHR_external_semaphore_win32
+    VULKAN_FN(vkGetSemaphoreWin32HandleKHR);
+    VULKAN_FN(vkImportSemaphoreWin32HandleKHR);
     #endif
   };
   
