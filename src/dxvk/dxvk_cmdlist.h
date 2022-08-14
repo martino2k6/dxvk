@@ -5,8 +5,10 @@
 #include "dxvk_bind_mask.h"
 #include "dxvk_buffer.h"
 #include "dxvk_descriptor.h"
+#include "dxvk_fence.h"
 #include "dxvk_gpu_event.h"
 #include "dxvk_gpu_query.h"
+#include "dxvk_graphics.h"
 #include "dxvk_lifetime.h"
 #include "dxvk_limits.h"
 #include "dxvk_pipelayout.h"
@@ -29,7 +31,7 @@ namespace dxvk {
   };
   
   using DxvkCmdBufferFlags = Flags<DxvkCmdBuffer>;
-  
+
   /**
    * \brief Queue submission info
    *
@@ -38,13 +40,15 @@ namespace dxvk {
    * only, array sizes are based on need.
    */
   struct DxvkQueueSubmission {
-    uint32_t              waitCount;
-    VkSemaphore           waitSync[2];
-    VkPipelineStageFlags  waitMask[2];
-    uint32_t              wakeCount;
-    VkSemaphore           wakeSync[2];
-    uint32_t              cmdBufferCount;
-    VkCommandBuffer       cmdBuffers[4];
+    std::vector<VkSemaphoreSubmitInfo>     waitSync;
+    std::vector<VkSemaphoreSubmitInfo>     wakeSync;
+    std::vector<VkCommandBufferSubmitInfo> cmdBuffers;
+
+    void reset() {
+      waitSync.clear();
+      wakeSync.clear();
+      cmdBuffers.clear();
+    }
   };
 
   /**
@@ -146,17 +150,9 @@ namespace dxvk {
      * the device can guarantee that the submission has
      * completed.
      */
-    template<DxvkAccess Access>
-    void trackResource(Rc<DxvkResource> rc) {
-      m_resources.trackResource<Access>(std::move(rc));
-    }
-    
-    /**
-     * \brief Tracks a descriptor pool
-     * \param [in] pool The descriptor pool
-     */
-    void trackDescriptorPool(Rc<DxvkDescriptorPool> pool) {
-      m_descriptorPoolTracker.trackDescriptorPool(pool);
+    template<DxvkAccess Access, typename T>
+    void trackResource(const Rc<T>& rc) {
+      m_resources.trackResource<Access>(rc.ptr());
     }
     
     /**
@@ -182,6 +178,15 @@ namespace dxvk {
     }
     
     /**
+     * \brief Tracks a graphics pipeline
+     * \param [in] pipeline Pipeline
+     */
+    void trackGraphicsPipeline(DxvkGraphicsPipeline* pipeline) {
+      pipeline->acquirePipeline();
+      m_pipelines.push_back(pipeline);
+    }
+
+    /**
      * \brief Queues signal
      * 
      * The signal will be notified once the command
@@ -199,6 +204,26 @@ namespace dxvk {
     void notifyObjects() {
       m_resources.notify();
       m_signalTracker.notify();
+    }
+
+    /**
+     * \brief Waits for fence
+     *
+     * \param [in] fence Fence to wait on
+     * \param [in] value Value to wait for
+     */
+    void waitFence(Rc<DxvkFence> fence, uint64_t value) {
+      m_waitSemaphores.emplace_back(std::move(fence), value);
+    }
+    
+    /**
+     * \brief Signals fence
+     *
+     * \param [in] fence Fence to signal
+     * \param [in] value Value to signal to
+     */
+    void signalFence(Rc<DxvkFence> fence, uint64_t value) {
+      m_signalSemaphores.emplace_back(std::move(fence), value);
     }
     
     /**
@@ -259,16 +284,14 @@ namespace dxvk {
       m_vkd->vkCmdBeginQueryIndexedEXT(
         m_execBuffer, queryPool, query, flags, index);
     }
-    
-    
-    void cmdBeginRenderPass(
-      const VkRenderPassBeginInfo*  pRenderPassBegin,
-            VkSubpassContents       contents) {
-      m_vkd->vkCmdBeginRenderPass(m_execBuffer,
-        pRenderPassBegin, contents);
+
+
+    void cmdBeginRendering(
+      const VkRenderingInfo*        pRenderingInfo) {
+      m_vkd->vkCmdBeginRendering(m_execBuffer, pRenderingInfo);
     }
 
-
+    
     void cmdBeginTransformFeedback(
             uint32_t                  firstBuffer,
             uint32_t                  bufferCount,
@@ -291,6 +314,20 @@ namespace dxvk {
     }
     
     
+    void cmdBindDescriptorSets(
+            VkPipelineBindPoint       pipeline,
+            VkPipelineLayout          pipelineLayout,
+            uint32_t                  firstSet,
+            uint32_t                  descriptorSetCount,
+      const VkDescriptorSet*          descriptorSets,
+            uint32_t                  dynamicOffsetCount,
+      const uint32_t*                 pDynamicOffsets) {
+      m_vkd->vkCmdBindDescriptorSets(m_execBuffer,
+        pipeline, pipelineLayout, firstSet, descriptorSetCount,
+        descriptorSets, dynamicOffsetCount, pDynamicOffsets);
+    }
+
+
     void cmdBindIndexBuffer(
             VkBuffer                buffer,
             VkDeviceSize            offset,
@@ -323,20 +360,10 @@ namespace dxvk {
             uint32_t                firstBinding,
             uint32_t                bindingCount,
       const VkBuffer*               pBuffers,
-      const VkDeviceSize*           pOffsets) {
-      m_vkd->vkCmdBindVertexBuffers(m_execBuffer,
-        firstBinding, bindingCount, pBuffers, pOffsets);
-    }
-    
-    
-    void cmdBindVertexBuffers2(
-            uint32_t                firstBinding,
-            uint32_t                bindingCount,
-      const VkBuffer*               pBuffers,
       const VkDeviceSize*           pOffsets,
       const VkDeviceSize*           pSizes,
       const VkDeviceSize*           pStrides) {
-      m_vkd->vkCmdBindVertexBuffers2EXT(m_execBuffer,
+      m_vkd->vkCmdBindVertexBuffers2(m_execBuffer,
         firstBinding, bindingCount, pBuffers, pOffsets,
         pSizes, pStrides);
     }
@@ -346,17 +373,8 @@ namespace dxvk {
     }
     
     void cmdBlitImage(
-            VkImage                 srcImage,
-            VkImageLayout           srcImageLayout,
-            VkImage                 dstImage,
-            VkImageLayout           dstImageLayout,
-            uint32_t                regionCount,
-      const VkImageBlit*            pRegions,
-            VkFilter                filter) {
-      m_vkd->vkCmdBlitImage(m_execBuffer,
-        srcImage, srcImageLayout,
-        dstImage, dstImageLayout,
-        regionCount, pRegions, filter);
+        const VkBlitImageInfo2*     pBlitInfo) {
+      m_vkd->vkCmdBlitImage2(m_execBuffer, pBlitInfo);
     }
     
     
@@ -397,62 +415,37 @@ namespace dxvk {
     
     void cmdCopyBuffer(
             DxvkCmdBuffer           cmdBuffer,
-            VkBuffer                srcBuffer,
-            VkBuffer                dstBuffer,
-            uint32_t                regionCount,
-      const VkBufferCopy*           pRegions) {
+      const VkCopyBufferInfo2*      copyInfo) {
       m_cmdBuffersUsed.set(cmdBuffer);
 
-      m_vkd->vkCmdCopyBuffer(getCmdBuffer(cmdBuffer),
-        srcBuffer, dstBuffer,
-        regionCount, pRegions);
+      m_vkd->vkCmdCopyBuffer2(getCmdBuffer(cmdBuffer), copyInfo);
     }
     
     
     void cmdCopyBufferToImage(
             DxvkCmdBuffer           cmdBuffer,
-            VkBuffer                srcBuffer,
-            VkImage                 dstImage,
-            VkImageLayout           dstImageLayout,
-            uint32_t                regionCount,
-      const VkBufferImageCopy*      pRegions) {
+      const VkCopyBufferToImageInfo2* copyInfo) {
       m_cmdBuffersUsed.set(cmdBuffer);
 
-      m_vkd->vkCmdCopyBufferToImage(getCmdBuffer(cmdBuffer),
-        srcBuffer, dstImage, dstImageLayout,
-        regionCount, pRegions);
+      m_vkd->vkCmdCopyBufferToImage2(getCmdBuffer(cmdBuffer), copyInfo);
     }
     
     
     void cmdCopyImage(
             DxvkCmdBuffer           cmdBuffer,
-            VkImage                 srcImage,
-            VkImageLayout           srcImageLayout,
-            VkImage                 dstImage,
-            VkImageLayout           dstImageLayout,
-            uint32_t                regionCount,
-      const VkImageCopy*            pRegions) {
+      const VkCopyImageInfo2*       copyInfo) {
       m_cmdBuffersUsed.set(cmdBuffer);
 
-      m_vkd->vkCmdCopyImage(getCmdBuffer(cmdBuffer),
-        srcImage, srcImageLayout,
-        dstImage, dstImageLayout,
-        regionCount, pRegions);
+      m_vkd->vkCmdCopyImage2(getCmdBuffer(cmdBuffer), copyInfo);
     }
     
     
     void cmdCopyImageToBuffer(
             DxvkCmdBuffer           cmdBuffer,
-            VkImage                 srcImage,
-            VkImageLayout           srcImageLayout,
-            VkBuffer                dstBuffer,
-            uint32_t                regionCount,
-      const VkBufferImageCopy*      pRegions) {
+      const VkCopyImageToBufferInfo2* copyInfo) {
       m_cmdBuffersUsed.set(cmdBuffer);
 
-      m_vkd->vkCmdCopyImageToBuffer(getCmdBuffer(cmdBuffer),
-        srcImage, srcImageLayout, dstBuffer,
-        regionCount, pRegions);
+      m_vkd->vkCmdCopyImageToBuffer2(getCmdBuffer(cmdBuffer), copyInfo);
     }
 
 
@@ -514,7 +507,7 @@ namespace dxvk {
             VkDeviceSize            countOffset,
             uint32_t                maxDrawCount,
             uint32_t                stride) {
-      m_vkd->vkCmdDrawIndirectCountKHR(m_execBuffer,
+      m_vkd->vkCmdDrawIndirectCount(m_execBuffer,
         buffer, offset, countBuffer, countOffset, maxDrawCount, stride);
     }
     
@@ -549,7 +542,7 @@ namespace dxvk {
             VkDeviceSize            countOffset,
             uint32_t                maxDrawCount,
             uint32_t                stride) {
-      m_vkd->vkCmdDrawIndexedIndirectCountKHR(m_execBuffer,
+      m_vkd->vkCmdDrawIndexedIndirectCount(m_execBuffer,
         buffer, offset, countBuffer, countOffset, maxDrawCount, stride);
     }
     
@@ -583,10 +576,10 @@ namespace dxvk {
     }
     
     
-    void cmdEndRenderPass() {
-      m_vkd->vkCmdEndRenderPass(m_execBuffer);
+    void cmdEndRendering() {
+      m_vkd->vkCmdEndRendering(m_execBuffer);
     }
-    
+
     
     void cmdEndTransformFeedback(
             uint32_t                  firstBuffer,
@@ -613,22 +606,10 @@ namespace dxvk {
     
     void cmdPipelineBarrier(
             DxvkCmdBuffer           cmdBuffer,
-            VkPipelineStageFlags    srcStageMask,
-            VkPipelineStageFlags    dstStageMask,
-            VkDependencyFlags       dependencyFlags,
-            uint32_t                memoryBarrierCount,
-      const VkMemoryBarrier*        pMemoryBarriers,
-            uint32_t                bufferMemoryBarrierCount,
-      const VkBufferMemoryBarrier*  pBufferMemoryBarriers,
-            uint32_t                imageMemoryBarrierCount,
-      const VkImageMemoryBarrier*   pImageMemoryBarriers) {
+      const VkDependencyInfo*       dependencyInfo) {
       m_cmdBuffersUsed.set(cmdBuffer);
 
-      m_vkd->vkCmdPipelineBarrier(getCmdBuffer(cmdBuffer),
-        srcStageMask, dstStageMask, dependencyFlags,
-        memoryBarrierCount,       pMemoryBarriers,
-        bufferMemoryBarrierCount, pBufferMemoryBarriers,
-        imageMemoryBarrierCount,  pImageMemoryBarriers);
+      m_vkd->vkCmdPipelineBarrier2(getCmdBuffer(cmdBuffer), dependencyInfo);
     }
     
     
@@ -644,16 +625,8 @@ namespace dxvk {
 
 
     void cmdResolveImage(
-            VkImage                 srcImage,
-            VkImageLayout           srcImageLayout,
-            VkImage                 dstImage,
-            VkImageLayout           dstImageLayout,
-            uint32_t                regionCount,
-      const VkImageResolve*         pRegions) {
-      m_vkd->vkCmdResolveImage(m_execBuffer,
-        srcImage, srcImageLayout,
-        dstImage, dstImageLayout,
-        regionCount, pRegions);
+      const VkResolveImageInfo2*    resolveInfo) {
+      m_vkd->vkCmdResolveImage2(m_execBuffer, resolveInfo);
     }
     
     
@@ -675,6 +648,12 @@ namespace dxvk {
     }
     
 
+    void cmdSetDepthBiasState(
+            VkBool32                depthBiasEnable) {
+      m_vkd->vkCmdSetDepthBiasEnable(m_execBuffer, depthBiasEnable);
+    }
+
+
     void cmdSetDepthBias(
             float                   depthBiasConstantFactor,
             float                   depthBiasClamp,
@@ -695,22 +674,87 @@ namespace dxvk {
     }
 
 
+    void cmdSetDepthBoundsState(
+            VkBool32                depthBoundsTestEnable) {
+      m_vkd->vkCmdSetDepthBoundsTestEnable(m_execBuffer, depthBoundsTestEnable);
+    }
+
+
+    void cmdSetDepthState(
+            VkBool32                depthTestEnable,
+            VkBool32                depthWriteEnable,
+            VkCompareOp             depthCompareOp) {
+      m_vkd->vkCmdSetDepthTestEnable(m_execBuffer, depthTestEnable);
+
+      if (depthTestEnable) {
+        m_vkd->vkCmdSetDepthWriteEnable(m_execBuffer, depthWriteEnable);
+        m_vkd->vkCmdSetDepthCompareOp(m_execBuffer, depthCompareOp);
+      } else {
+        m_vkd->vkCmdSetDepthWriteEnable(m_execBuffer, VK_FALSE);
+        m_vkd->vkCmdSetDepthCompareOp(m_execBuffer, VK_COMPARE_OP_ALWAYS);
+      }
+    }
+
+
     void cmdSetEvent(
             VkEvent                 event,
-            VkPipelineStageFlags    stages) {
-      m_vkd->vkCmdSetEvent(m_execBuffer, event, stages);
+      const VkDependencyInfo*       dependencyInfo) {
+      m_vkd->vkCmdSetEvent2(m_execBuffer, event, dependencyInfo);
+    }
+
+
+    void cmdSetRasterizerState(
+            VkCullModeFlags         cullMode,
+            VkFrontFace             frontFace) {
+      m_vkd->vkCmdSetCullMode(m_execBuffer, cullMode);
+      m_vkd->vkCmdSetFrontFace(m_execBuffer, frontFace);
     }
 
     
     void cmdSetScissor(
-            uint32_t                firstScissor,
             uint32_t                scissorCount,
       const VkRect2D*               scissors) {
-      m_vkd->vkCmdSetScissor(m_execBuffer,
-        firstScissor, scissorCount, scissors);
+      m_vkd->vkCmdSetScissorWithCount(
+        m_execBuffer, scissorCount, scissors);
     }
-    
-    
+
+
+    void cmdSetStencilState(
+            VkBool32                enableStencilTest,
+      const VkStencilOpState&       front,
+      const VkStencilOpState&       back) {
+      m_vkd->vkCmdSetStencilTestEnable(
+        m_execBuffer, enableStencilTest);
+
+      if (enableStencilTest) {
+        m_vkd->vkCmdSetStencilOp(m_execBuffer,
+          VK_STENCIL_FACE_FRONT_BIT, front.failOp,
+          front.passOp, front.depthFailOp, front.compareOp);
+        m_vkd->vkCmdSetStencilCompareMask(m_execBuffer,
+          VK_STENCIL_FACE_FRONT_BIT, front.compareMask);
+        m_vkd->vkCmdSetStencilWriteMask(m_execBuffer,
+          VK_STENCIL_FACE_FRONT_BIT, front.writeMask);
+
+        m_vkd->vkCmdSetStencilOp(m_execBuffer,
+          VK_STENCIL_FACE_BACK_BIT, back.failOp,
+          back.passOp, back.depthFailOp, back.compareOp);
+        m_vkd->vkCmdSetStencilCompareMask(m_execBuffer,
+          VK_STENCIL_FACE_BACK_BIT, back.compareMask);
+        m_vkd->vkCmdSetStencilWriteMask(m_execBuffer,
+          VK_STENCIL_FACE_BACK_BIT, back.writeMask);
+      } else {
+        m_vkd->vkCmdSetStencilOp(m_execBuffer,
+          VK_STENCIL_FACE_FRONT_AND_BACK,
+          VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
+          VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
+        m_vkd->vkCmdSetStencilCompareMask(m_execBuffer,
+          VK_STENCIL_FACE_FRONT_AND_BACK, 0x0);
+        m_vkd->vkCmdSetStencilWriteMask(m_execBuffer,
+          VK_STENCIL_FACE_FRONT_AND_BACK, 0x0);
+      }
+    }
+
+
     void cmdSetStencilReference(
             VkStencilFaceFlags      faceMask,
             uint32_t                reference) {
@@ -720,19 +764,18 @@ namespace dxvk {
     
     
     void cmdSetViewport(
-            uint32_t                firstViewport,
             uint32_t                viewportCount,
       const VkViewport*             viewports) {
-      m_vkd->vkCmdSetViewport(m_execBuffer,
-        firstViewport, viewportCount, viewports);
+      m_vkd->vkCmdSetViewportWithCount(
+        m_execBuffer, viewportCount, viewports);
     }
-    
-    
+
+
     void cmdWriteTimestamp(
-            VkPipelineStageFlagBits pipelineStage,
+            VkPipelineStageFlagBits2 pipelineStage,
             VkQueryPool             queryPool,
             uint32_t                query) {
-      m_vkd->vkCmdWriteTimestamp(m_execBuffer,
+      m_vkd->vkCmdWriteTimestamp2(m_execBuffer,
         pipelineStage, queryPool, query);
     }
     
@@ -745,8 +788,15 @@ namespace dxvk {
     void resetQuery(
             VkQueryPool             queryPool,
             uint32_t                queryId) {
-      m_vkd->vkResetQueryPoolEXT(
+      m_vkd->vkResetQueryPool(
         m_vkd->device(), queryPool, queryId, 1);
+    }
+
+    void trackDescriptorPool(
+      const Rc<DxvkDescriptorPool>&       pool,
+      const Rc<DxvkDescriptorManager>&    manager) {
+      pool->updateStats(m_statCounters);
+      m_descriptorPools.push_back({ pool, manager });
     }
 
   private:
@@ -765,15 +815,24 @@ namespace dxvk {
     VkCommandBuffer     m_sdmaBuffer = VK_NULL_HANDLE;
 
     VkSemaphore         m_sdmaSemaphore = VK_NULL_HANDLE;
-    
+
     DxvkCmdBufferFlags  m_cmdBuffersUsed;
     DxvkLifetimeTracker m_resources;
-    DxvkDescriptorPoolTracker m_descriptorPoolTracker;
     DxvkSignalTracker   m_signalTracker;
     DxvkGpuEventTracker m_gpuEventTracker;
     DxvkGpuQueryTracker m_gpuQueryTracker;
     DxvkBufferTracker   m_bufferTracker;
     DxvkStatCounters    m_statCounters;
+    DxvkQueueSubmission m_submission;
+
+    std::vector<DxvkFenceValuePair> m_waitSemaphores;
+    std::vector<DxvkFenceValuePair> m_signalSemaphores;
+    
+    std::vector<std::pair<
+      Rc<DxvkDescriptorPool>,
+      Rc<DxvkDescriptorManager>>> m_descriptorPools;
+
+    std::vector<DxvkGraphicsPipeline*> m_pipelines;
 
     VkCommandBuffer getCmdBuffer(DxvkCmdBuffer cmdBuffer) const {
       if (cmdBuffer == DxvkCmdBuffer::ExecBuffer) return m_execBuffer;

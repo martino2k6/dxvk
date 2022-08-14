@@ -12,7 +12,6 @@
 namespace dxvk {
   
   class D3D11Device;
-  class D3D11DeviceContext;
 
 
   /**
@@ -81,18 +80,20 @@ namespace dxvk {
     
     DxvkBufferSlice GetBufferSlice(VkDeviceSize offset) const {
       VkDeviceSize size = m_desc.ByteWidth;
-
-      return likely(offset < size)
-        ? DxvkBufferSlice(m_buffer, offset, size - offset)
-        : DxvkBufferSlice();
+      offset = std::min(offset, size);
+      return DxvkBufferSlice(m_buffer, offset, size - offset);
     }
     
     DxvkBufferSlice GetBufferSlice(VkDeviceSize offset, VkDeviceSize length) const {
       VkDeviceSize size = m_desc.ByteWidth;
+      offset = std::min(offset, size);
+      return DxvkBufferSlice(m_buffer, offset, std::min(length, size - offset));
+    }
 
-      return likely(offset < size)
-        ? DxvkBufferSlice(m_buffer, offset, std::min(length, size - offset))
-        : DxvkBufferSlice();
+    VkDeviceSize GetRemainingSize(VkDeviceSize offset) const {
+      VkDeviceSize size = m_desc.ByteWidth;
+      offset = std::min(offset, size);
+      return size - offset;
     }
 
     DxvkBufferSlice GetSOCounter() {

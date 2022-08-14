@@ -12,6 +12,7 @@
 #include "d3d11_context_def.h"
 #include "d3d11_context_imm.h"
 #include "d3d11_device.h"
+#include "d3d11_fence.h"
 #include "d3d11_input_layout.h"
 #include "d3d11_interop.h"
 #include "d3d11_query.h"
@@ -590,7 +591,10 @@ namespace dxvk {
           ID3D11InputLayout**         ppInputLayout) {
     InitReturnPtr(ppInputLayout);
 
-    if (pInputElementDescs == nullptr)
+    // This check is somehow even correct, passing null with zero
+    // size will always fail but passing non-null with zero size
+    // works, provided the shader does not have any actual inputs
+    if (!pInputElementDescs)
       return E_INVALIDARG;
     
     try {
@@ -602,44 +606,39 @@ namespace dxvk {
 
       uint32_t attrMask = 0;
       uint32_t bindMask = 0;
+      uint32_t locationMask = 0;
+      uint32_t bindingsDefined = 0;
       
-      std::array<DxvkVertexAttribute, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> attrList;
-      std::array<DxvkVertexBinding,   D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> bindList;
+      std::array<DxvkVertexAttribute, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> attrList = { };
+      std::array<DxvkVertexBinding,   D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> bindList = { };
       
       for (uint32_t i = 0; i < NumElements; i++) {
         const DxbcSgnEntry* entry = inputSignature->find(
           pInputElementDescs[i].SemanticName,
           pInputElementDescs[i].SemanticIndex, 0);
-        
-        if (entry == nullptr) {
-          Logger::debug(str::format(
-            "D3D11Device: No such vertex shader semantic: ",
-            pInputElementDescs[i].SemanticName,
-            pInputElementDescs[i].SemanticIndex));
-        }
-        
+
         // Create vertex input attribute description
         DxvkVertexAttribute attrib;
         attrib.location = entry != nullptr ? entry->registerId : 0;
         attrib.binding  = pInputElementDescs[i].InputSlot;
         attrib.format   = LookupFormat(pInputElementDescs[i].Format, DXGI_VK_FORMAT_MODE_COLOR).Format;
         attrib.offset   = pInputElementDescs[i].AlignedByteOffset;
-        
+
         // The application may choose to let the implementation
         // generate the exact vertex layout. In that case we'll
         // pack attributes on the same binding in the order they
         // are declared, aligning each attribute to four bytes.
-        const DxvkFormatInfo* formatInfo = imageFormatInfo(attrib.format);
+        const DxvkFormatInfo* formatInfo = lookupFormatInfo(attrib.format);
         VkDeviceSize alignment = std::min<VkDeviceSize>(formatInfo->elementSize, 4);
 
         if (attrib.offset == D3D11_APPEND_ALIGNED_ELEMENT) {
           attrib.offset = 0;
-          
+
           for (uint32_t j = 1; j <= i; j++) {
             const DxvkVertexAttribute& prev = attrList.at(i - j);
-            
+
             if (prev.binding == attrib.binding) {
-              attrib.offset = align(prev.offset + imageFormatInfo(prev.format)->elementSize, alignment);
+              attrib.offset = align(prev.offset + lookupFormatInfo(prev.format)->elementSize, alignment);
               break;
             }
           }
@@ -647,7 +646,7 @@ namespace dxvk {
           return E_INVALIDARG;
 
         attrList.at(i) = attrib;
-        
+
         // Create vertex input binding description. The
         // stride is dynamic state in D3D11 and will be
         // set by D3D11DeviceContext::IASetVertexBuffers.
@@ -656,33 +655,35 @@ namespace dxvk {
         binding.fetchRate = pInputElementDescs[i].InstanceDataStepRate;
         binding.inputRate = pInputElementDescs[i].InputSlotClass == D3D11_INPUT_PER_INSTANCE_DATA
           ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-        
+        binding.extent    = entry ? uint32_t(attrib.offset + formatInfo->elementSize) : 0u;
+
         // Check if the binding was already defined. If so, the
         // parameters must be identical (namely, the input rate).
-        bool bindingDefined = false;
-        
-        for (uint32_t j = 0; j < i; j++) {
-          uint32_t bindingId = attrList.at(j).binding;
+        if (bindingsDefined & (1u << binding.binding)) {
+          if (bindList.at(binding.binding).inputRate != binding.inputRate)
+            return E_INVALIDARG;
 
-          if (binding.binding == bindingId) {
-            bindingDefined = true;
-            
-            if (binding.inputRate != bindList.at(bindingId).inputRate) {
-              Logger::err(str::format(
-                "D3D11Device: Conflicting input rate for binding ",
-                binding.binding));
-              return E_INVALIDARG;
-            }
-          }
+          bindList.at(binding.binding).extent = std::max(
+            bindList.at(binding.binding).extent, binding.extent);
+        } else {
+          bindList.at(binding.binding) = binding;
+          bindingsDefined |= 1u << binding.binding;
         }
 
-        if (!bindingDefined)
-          bindList.at(binding.binding) = binding;
-        
-        if (entry != nullptr) {
+        if (entry) {
           attrMask |= 1u << i;
           bindMask |= 1u << binding.binding;
+          locationMask |= 1u << attrib.location;
         }
+      }
+
+      // Ensure that all inputs used by the shader are defined
+      for (auto i = inputSignature->begin(); i != inputSignature->end(); i++) {
+        bool isBuiltIn = DxbcIsgn::compareSemanticNames(i->semanticName, "sv_instanceid")
+                      || DxbcIsgn::compareSemanticNames(i->semanticName, "sv_vertexid");
+
+        if (!isBuiltIn && !(locationMask & (1u << i->registerId)))
+          return E_INVALIDARG;
       }
 
       // Compact the attribute and binding lists to filter
@@ -690,32 +691,13 @@ namespace dxvk {
       uint32_t attrCount = CompactSparseList(attrList.data(), attrMask);
       uint32_t bindCount = CompactSparseList(bindList.data(), bindMask);
 
-      // Check if there are any semantics defined in the
-      // shader that are not included in the current input
-      // layout.
-      for (auto i = inputSignature->begin(); i != inputSignature->end(); i++) {
-        bool found = i->systemValue != DxbcSystemValue::None;
-        
-        for (uint32_t j = 0; j < attrCount && !found; j++)
-          found = attrList.at(j).location == i->registerId;
-        
-        if (!found) {
-          Logger::warn(str::format(
-            "D3D11Device: Vertex input '",
-            i->semanticName, i->semanticIndex,
-            "' not defined by input layout"));
-        }
-      }
-      
-      // Create the actual input layout object
-      // if the application requests it.
-      if (ppInputLayout != nullptr) {
-        *ppInputLayout = ref(
-          new D3D11InputLayout(this,
-            attrCount, attrList.data(),
-            bindCount, bindList.data()));
-      }
-      
+      if (!ppInputLayout)
+        return S_FALSE;
+
+      *ppInputLayout = ref(
+        new D3D11InputLayout(this,
+          attrCount, attrList.data(),
+          bindCount, bindList.data()));
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
@@ -1349,16 +1331,17 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11Device::CreateFence(
           UINT64                      InitialValue,
           D3D11_FENCE_FLAG            Flags,
-          REFIID                      ReturnedInterface,
+          REFIID                      riid,
           void**                      ppFence) {
     InitReturnPtr(ppFence);
 
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::err("D3D11Device::CreateFence: Not implemented");
-    
-    return E_NOTIMPL;
+    try {
+      Com<D3D11Fence> fence = new D3D11Fence(this, InitialValue, Flags, INVALID_HANDLE_VALUE);
+      return fence->QueryInterface(riid, ppFence);
+    } catch (const DxvkError& e) {
+      Logger::err(e.message());
+      return E_FAIL;
+    }
   }
 
 
@@ -1424,8 +1407,16 @@ namespace dxvk {
           void**      ppFence) {
     InitReturnPtr(ppFence);
 
-    Logger::err("D3D11Device::OpenSharedFence: Not implemented");
-    return E_NOTIMPL;
+    if (ppFence == nullptr)
+      return S_FALSE;
+
+    try {
+      Com<D3D11Fence> fence = new D3D11Fence(this, 0, D3D11_FENCE_FLAG_SHARED, hFence);
+      return fence->QueryInterface(ReturnedInterface, ppFence);
+    } catch (const DxvkError& e) {
+      Logger::err(e.message());
+      return E_FAIL;
+    }
   }
 
 
@@ -1714,10 +1705,12 @@ namespace dxvk {
         if (FeatureSupportDataSize != sizeof(D3D11_FEATURE_DATA_D3D11_OPTIONS3))
           return E_INVALIDARG;
 
-        const auto& extensions = m_dxvkDevice->extensions();
+        const auto& features = m_dxvkDevice->features();
 
         auto info = static_cast<D3D11_FEATURE_DATA_D3D11_OPTIONS3*>(pFeatureSupportData);
-        info->VPAndRTArrayIndexFromAnyShaderFeedingRasterizer = extensions.extShaderViewportIndexLayer;
+        info->VPAndRTArrayIndexFromAnyShaderFeedingRasterizer =
+          features.vk12.shaderOutputViewportIndex &&
+          features.vk12.shaderOutputLayer;
       } return S_OK;
 
       case D3D11_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT: {
@@ -1927,15 +1920,14 @@ namespace dxvk {
     enabled.core.features.shaderStorageImageWriteWithoutFormat    = VK_TRUE;
     enabled.core.features.depthBounds                             = supported.core.features.depthBounds;
 
-    enabled.shaderDrawParameters.shaderDrawParameters             = VK_TRUE;
+    enabled.vk11.shaderDrawParameters                             = VK_TRUE;
+
+    enabled.vk12.samplerMirrorClampToEdge                         = VK_TRUE;
+    enabled.vk12.timelineSemaphore                                = VK_TRUE;
+
+    enabled.vk13.shaderDemoteToHelperInvocation                   = supported.vk13.shaderDemoteToHelperInvocation;
 
     enabled.extMemoryPriority.memoryPriority                      = supported.extMemoryPriority.memoryPriority;
-
-    enabled.extRobustness2.robustBufferAccess2                    = supported.extRobustness2.robustBufferAccess2;
-    enabled.extRobustness2.robustImageAccess2                     = supported.extRobustness2.robustImageAccess2;
-    enabled.extRobustness2.nullDescriptor                         = supported.extRobustness2.nullDescriptor;
-
-    enabled.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation  = supported.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation;
 
     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor      = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor;
     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor  = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor;
@@ -1956,7 +1948,6 @@ namespace dxvk {
       enabled.core.features.shaderCullDistance                    = VK_TRUE;
       enabled.core.features.textureCompressionBC                  = VK_TRUE;
       enabled.extDepthClipEnable.depthClipEnable                  = supported.extDepthClipEnable.depthClipEnable;
-      enabled.extHostQueryReset.hostQueryReset                    = VK_TRUE;
     }
     
     if (featureLevel >= D3D_FEATURE_LEVEL_9_2) {
@@ -2028,7 +2019,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     if (shader->flags().test(DxvkShaderFlag::ExportsViewportIndexLayerFromVertexStage)
-     && !m_dxvkDevice->extensions().extShaderViewportIndexLayer)
+     && (!m_dxvkDevice->features().vk12.shaderOutputViewportIndex
+      || !m_dxvkDevice->features().vk12.shaderOutputLayer))
       return E_INVALIDARG;
 
     *pShaderModule = std::move(commonShader);
@@ -2048,7 +2040,7 @@ namespace dxvk {
       return E_FAIL;
     
     // Query Vulkan format properties and supported features for it
-    const DxvkFormatInfo* fmtProperties = imageFormatInfo(fmtMapping.Format);
+    const DxvkFormatInfo* fmtProperties = lookupFormatInfo(fmtMapping.Format);
 
     VkFormatProperties fmtSupport = fmtMapping.Format != VK_FORMAT_UNDEFINED
       ? m_dxvkAdapter->formatProperties(fmtMapping.Format)
@@ -2340,7 +2332,7 @@ namespace dxvk {
       texture->Desc()->Format,
       texture->GetFormatMode()).Format;
     
-    auto formatInfo = imageFormatInfo(packedFormat);
+    auto formatInfo = lookupFormatInfo(packedFormat);
     
     // Validate box against subresource dimensions
     Rc<DxvkImage> image = texture->GetImage();
@@ -2495,7 +2487,7 @@ namespace dxvk {
         
       case D3D11_VK_EXT_MULTI_DRAW_INDIRECT_COUNT:
         return deviceFeatures.core.features.multiDrawIndirect
-            && deviceExtensions.khrDrawIndirectCount;
+            && deviceFeatures.vk12.drawIndirectCount;
       
       case D3D11_VK_EXT_DEPTH_BOUNDS:
         return deviceFeatures.core.features.depthBounds;
@@ -2505,7 +2497,7 @@ namespace dxvk {
 
       case D3D11_VK_NVX_BINARY_IMPORT:
         return deviceExtensions.nvxBinaryImport
-            && deviceExtensions.khrBufferDeviceAddress;
+            && deviceFeatures.vk12.bufferDeviceAddress;
 
       default:
         return false;
@@ -2664,9 +2656,10 @@ namespace dxvk {
       const DxvkBufferSliceHandle bufSliceHandle = buffer->GetBuffer()->getSliceHandle();
       VkBuffer vkBuffer = bufSliceHandle.handle;
 
-      VkBufferDeviceAddressInfoKHR bdaInfo = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR };
+      VkBufferDeviceAddressInfo bdaInfo = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
       bdaInfo.buffer = vkBuffer;
-      VkDeviceAddress bufAddr = dxvkDevice->vkd()->vkGetBufferDeviceAddressKHR(vkDevice, &bdaInfo);
+
+      VkDeviceAddress bufAddr = dxvkDevice->vkd()->vkGetBufferDeviceAddress(vkDevice, &bdaInfo);
       *gpuVAStart = uint64_t(bufAddr) + bufSliceHandle.offset;
       *gpuVASize = bufSliceHandle.length;
     }

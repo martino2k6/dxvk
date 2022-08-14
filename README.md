@@ -82,6 +82,7 @@ The `DXVK_HUD` environment variable controls a HUD which can display the framera
 - `submissions`: Shows the number of command buffers submitted per frame.
 - `drawcalls`: Shows the number of draw calls and render passes per frame.
 - `pipelines`: Shows the total number of graphics and compute pipelines.
+- `descriptors`: Shows the number of descriptor pools and descriptor sets.
 - `memory`: Shows the amount of device memory allocated and used.
 - `gpuload`: Shows estimated GPU load. May be inaccurate.
 - `version`: Shows DXVK version.
@@ -106,7 +107,9 @@ Some applications do not provide a method to select a different GPU. In that cas
 DXVK caches pipeline state by default, so that shaders can be recompiled ahead of time on subsequent runs of an application, even if the driver's own shader cache got invalidated in the meantime. This cache is enabled by default, and generally reduces stuttering.
 
 The following environment variables can be used to control the cache:
-- `DXVK_STATE_CACHE=0` Disables the state cache.
+- `DXVK_STATE_CACHE`: Controls the state cache. The following values are supported:
+  - `disable`: Disables the cache entirely.
+  - `reset`: Clears the cache file.
 - `DXVK_STATE_CACHE_PATH=/some/directory` Specifies a directory where to put the cache files. Defaults to the current working directory of the application.
 
 ### Debugging

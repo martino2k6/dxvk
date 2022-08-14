@@ -9,7 +9,7 @@ namespace dxvk {
           D3D11Device*                pParent)
   : m_parent(pParent),
     m_device(pParent->GetDXVKDevice()),
-    m_context(m_device->createContext()) {
+    m_context(m_device->createContext(DxvkContextType::Supplementary)) {
     m_context->beginRecording(
       m_device->createCommandList());
   }
@@ -123,7 +123,7 @@ namespace dxvk {
     auto desc = pTexture->Desc();
 
     VkFormat packedFormat = m_parent->LookupPackedFormat(desc->Format, pTexture->GetFormatMode()).Format;
-    auto formatInfo = imageFormatInfo(packedFormat);
+    auto formatInfo = lookupFormatInfo(packedFormat);
 
     if (pInitialData != nullptr && pInitialData->pSysMem != nullptr) {
       // pInitialData is an array that stores an entry for

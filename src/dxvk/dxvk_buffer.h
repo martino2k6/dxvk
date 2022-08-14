@@ -142,6 +142,16 @@ namespace dxvk {
     void* mapPtr(VkDeviceSize offset) const {
       return reinterpret_cast<char*>(m_physSlice.mapPtr) + offset;
     }
+
+    /**
+     * \brief Queries shader stages that can access this buffer
+     *
+     * Derived from the pipeline stage mask passed in during creation.
+     * \returns Shader stages that may access this buffer
+     */
+    VkShaderStageFlags getShaderStages() const {
+      return m_shaderStages;
+    }
     
     /**
      * \brief Retrieves slice handle
@@ -286,6 +296,7 @@ namespace dxvk {
     DxvkBufferCreateInfo    m_info;
     DxvkMemoryAllocator*    m_memAlloc;
     VkMemoryPropertyFlags   m_memFlags;
+    VkShaderStageFlags      m_shaderStages;
     
     DxvkBufferHandle        m_buffer;
     DxvkBufferSliceHandle   m_physSlice;
@@ -507,7 +518,18 @@ namespace dxvk {
       return this->m_offset == other.m_offset
           && this->m_length == other.m_length;
     }
-    
+
+    /**
+     * \brief Sets buffer range
+     *
+     * \param [in] offset New offset
+     * \param [in] length New length
+     */
+    void setRange(VkDeviceSize offset, VkDeviceSize length) {
+      m_offset = offset;
+      m_length = length;
+    }
+
   private:
     
     Rc<DxvkBuffer> m_buffer = nullptr;
@@ -552,7 +574,7 @@ namespace dxvk {
      * \returns Element count
      */
     VkDeviceSize elementCount() const {
-      auto format = imageFormatInfo(m_info.format);
+      auto format = lookupFormatInfo(m_info.format);
       return m_info.rangeLength / format->elementSize;
     }
     
@@ -585,7 +607,7 @@ namespace dxvk {
      * \returns View format info
      */
     const DxvkFormatInfo* formatInfo() const {
-      return imageFormatInfo(m_info.format);
+      return lookupFormatInfo(m_info.format);
     }
 
     /**

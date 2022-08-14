@@ -14,7 +14,8 @@ namespace dxvk {
   : m_device        (device),
     m_info          (createInfo),
     m_memAlloc      (&memAlloc),
-    m_memFlags      (memFlags) {
+    m_memFlags      (memFlags),
+    m_shaderStages  (util::shaderStages(createInfo.stages)) {
     // Align slices so that we don't violate any alignment
     // requirements imposed by the Vulkan device/driver
     VkDeviceSize sliceAlignment = computeSliceAlignment();
@@ -57,15 +58,10 @@ namespace dxvk {
   DxvkBufferHandle DxvkBuffer::allocBuffer(VkDeviceSize sliceCount, bool clear) const {
     auto vkd = m_device->vkd();
 
-    VkBufferCreateInfo info;
-    info.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    info.pNext                 = nullptr;
-    info.flags                 = 0;
+    VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     info.size                  = m_physSliceStride * sliceCount;
     info.usage                 = m_info.usage;
     info.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
-    info.queueFamilyIndexCount = 0;
-    info.pQueueFamilyIndices   = nullptr;
     
     DxvkBufferHandle handle;
 
@@ -77,26 +73,14 @@ namespace dxvk {
         "\n  usage: ", info.usage));
     }
     
-    VkMemoryDedicatedRequirements dedicatedRequirements;
-    dedicatedRequirements.sType                       = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS;
-    dedicatedRequirements.pNext                       = VK_NULL_HANDLE;
-    dedicatedRequirements.prefersDedicatedAllocation  = VK_FALSE;
-    dedicatedRequirements.requiresDedicatedAllocation = VK_FALSE;
+    VkMemoryDedicatedRequirements dedicatedRequirements = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+    VkMemoryRequirements2 memReq = { VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicatedRequirements };
     
-    VkMemoryRequirements2 memReq;
-    memReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
-    memReq.pNext = &dedicatedRequirements;
-    
-    VkBufferMemoryRequirementsInfo2 memReqInfo;
-    memReqInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2;
+    VkBufferMemoryRequirementsInfo2 memReqInfo = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2 };
     memReqInfo.buffer = handle.buffer;
-    memReqInfo.pNext  = VK_NULL_HANDLE;
     
-    VkMemoryDedicatedAllocateInfo dedMemoryAllocInfo;
-    dedMemoryAllocInfo.sType  = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
-    dedMemoryAllocInfo.pNext  = VK_NULL_HANDLE;
+    VkMemoryDedicatedAllocateInfo dedMemoryAllocInfo = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
     dedMemoryAllocInfo.buffer = handle.buffer;
-    dedMemoryAllocInfo.image  = VK_NULL_HANDLE;
 
     vkd->vkGetBufferMemoryRequirements2(
        vkd->device(), &memReqInfo, &memReq);
@@ -134,31 +118,35 @@ namespace dxvk {
 
 
   VkDeviceSize DxvkBuffer::computeSliceAlignment() const {
-    const auto& devInfo = m_device->properties().core.properties;
+    const auto& devInfo = m_device->properties();
 
     VkDeviceSize result = sizeof(uint32_t);
 
-    if (m_info.usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)
-      result = std::max(result, devInfo.limits.minUniformBufferOffsetAlignment);
+    if (m_info.usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) {
+      result = std::max(result, devInfo.core.properties.limits.minUniformBufferOffsetAlignment);
+      result = std::max(result, devInfo.extRobustness2.robustUniformBufferAccessSizeAlignment);
+    }
 
-    if (m_info.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
-      result = std::max(result, devInfo.limits.minStorageBufferOffsetAlignment);
+    if (m_info.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
+      result = std::max(result, devInfo.core.properties.limits.minStorageBufferOffsetAlignment);
+      result = std::max(result, devInfo.extRobustness2.robustStorageBufferAccessSizeAlignment);
+    }
 
     if (m_info.usage & (VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT)) {
-      result = std::max(result, devInfo.limits.minTexelBufferOffsetAlignment);
+      result = std::max(result, devInfo.core.properties.limits.minTexelBufferOffsetAlignment);
       result = std::max(result, VkDeviceSize(16));
     }
 
     if (m_info.usage & (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
-     && m_info.size > (devInfo.limits.optimalBufferCopyOffsetAlignment / 2))
-      result = std::max(result, devInfo.limits.optimalBufferCopyOffsetAlignment);
+     && m_info.size > (devInfo.core.properties.limits.optimalBufferCopyOffsetAlignment / 2))
+      result = std::max(result, devInfo.core.properties.limits.optimalBufferCopyOffsetAlignment);
 
     // For some reason, Warhammer Chaosbane breaks otherwise
     if (m_info.usage & (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
       result = std::max(result, VkDeviceSize(256));
 
     if (m_memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      result = std::max(result, devInfo.limits.nonCoherentAtomSize);
+      result = std::max(result, devInfo.core.properties.limits.nonCoherentAtomSize);
       result = std::max(result, VkDeviceSize(64));
     }
 
@@ -194,10 +182,7 @@ namespace dxvk {
   
   VkBufferView DxvkBufferView::createBufferView(
     const DxvkBufferSliceHandle& slice) {
-    VkBufferViewCreateInfo viewInfo;
-    viewInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
-    viewInfo.pNext  = nullptr;
-    viewInfo.flags  = 0;
+    VkBufferViewCreateInfo viewInfo = { VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO };
     viewInfo.buffer = slice.handle;
     viewInfo.format = m_info.format;
     viewInfo.offset = slice.offset;

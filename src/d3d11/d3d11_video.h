@@ -585,6 +585,7 @@ namespace dxvk {
       float colorMatrix[3][4];
       float coordMatrix[3][2];
       float yMin, yMax;
+      VkBool32 isPlanar;
     };
 
     D3D11ImmediateContext* m_ctx;
@@ -606,6 +607,8 @@ namespace dxvk {
     void BlitStream(
       const D3D11VideoProcessorStreamState* pStreamState,
       const D3D11_VIDEO_PROCESSOR_STREAM*   pStream);
+
+    void UnbindResources();
 
   };
 

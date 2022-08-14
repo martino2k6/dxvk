@@ -31,6 +31,12 @@ namespace dxvk {
     { R"(\\EthanCarter-Win64-Shipping\.exe$)", {{
       { "dxgi.customVendorId",              "10de" },
     }} },
+     /* EVE Online: Needs this to expose D3D12     *
+     * otherwise D3D12 option on launcher is      *
+     * greyed out                                 */
+    { R"(\\evelauncher\.exe$)", {{
+      { "d3d11.maxFeatureLevel",            "12_1" },
+    }} },
     /* The Evil Within: Submits command lists     * 
      * multiple times                             */
     { R"(\\EvilWithin(Demo)?\.exe$)", {{
@@ -107,18 +113,6 @@ namespace dxvk {
     { R"(\\starwarsbattlefront(trial)?\.exe$)", {{
       { "dxgi.nvapiHack",                   "False" },
     }} },
-    /* Dark Souls Remastered                      */
-    { R"(\\DarkSoulsRemastered\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
-    /* Grim Dawn                                  */
-    { R"(\\Grim Dawn\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
-    /* NieR:Automata                              */
-    { R"(\\NieRAutomata\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
     /* NieR Replicant                             */
     { R"(\\NieR Replicant ver\.1\.22474487139\.exe)", {{
       { "dxgi.syncInterval",                "1"    },
@@ -136,18 +130,6 @@ namespace dxvk {
     /* Modern Warfare Remastered                  */
     { R"(\\h1_[ms]p64_ship\.exe$)", {{
       { "dxgi.customVendorId",              "10de" },
-    }} },
-    /* Titan Quest                                */
-    { R"(\\TQ\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
-    /* Saints Row IV                              */
-    { R"(\\SaintsRowIV\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
-    /* Saints Row: The Third                      */
-    { R"(\\SaintsRowTheThird_DX11\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
     }} },
     /* Crysis 3 - slower if it notices AMD card     *
      * Apitrace mode helps massively in cpu bound   *
@@ -201,14 +183,6 @@ namespace dxvk {
     { R"(\\F1_20(1[89]|[2-9][0-9])\.exe$)", {{
       { "d3d11.forceTgsmBarriers",          "True" },
     }} },
-    /* Blue Reflection                            */
-    { R"(\\BLUE_REFLECTION\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
-    /* Secret World Legends                       */
-    { R"(\\SecretWorldLegendsDX11\.exe$)", {{
-      { "d3d11.constantBufferRangeCheck",   "True" },
-    }} },
     /* Darksiders Warmastered - apparently reads  *
      * from write-only mapped buffers             */
     { R"(\\darksiders1\.exe$)", {{
@@ -259,9 +233,13 @@ namespace dxvk {
     { R"(\\WOFF\.exe$)", {{
       { "d3d11.disableMsaa",                "True" },
     }} },
-    /* Final Fantasy XIV - Stuttering on NV       */
+     /* Mary Skelter 2 - Broken MSAA              */
+    { R"(\\MarySkelter2\.exe$)", {{
+      { "d3d11.disableMsaa",                "True" },
+    }} },
+    /* Final Fantasy XIV: Uses lots of HVV and    *
+     * also reads some uncached memory.           */
     { R"(\\ffxiv_dx11\.exe$)", {{
-      { "dxvk.shrinkNvidiaHvvHeap",         "True" },
       { "d3d11.cachedDynamicResources",     "vi"   },
     }} },
     /* God of War - relies on NVAPI/AMDAGS for    *
@@ -291,6 +269,25 @@ namespace dxvk {
     }} },
     { R"(\\SRBT\.exe$)", {{
       { "d3d9.deferSurfaceCreation",        "True" },
+    }} },
+    /* A Way Out: fix for stuttering and low fps  */
+    { R"(\\AWayOut(_friend)?\.exe$)", {{
+      { "dxgi.maxFrameLatency",                "1" },
+    }} },
+    /* Garden Warfare 2
+       Won't start on amd Id without atiadlxx     */
+    { R"(\\GW2.Main_Win64_Retail\.exe$)", {{
+      { "dxgi.customVendorId",           "10de"   },
+    }} },
+    /* DayZ */
+    { R"(\\DayZ_x64\.exe$)", {{
+      { "d3d11.cachedDynamicResources",     "cr" },
+    }} },
+    /* Stray - writes to the same UAV every draw, *
+     * presumably for culling, which doesn't play *
+     * nicely with D3D11 without vendor libraries */
+    { R"(\\Stray-Win64-Shipping\.exe$)", {{
+      { "d3d11.ignoreGraphicsBarriers",     "True" },
     }} },
 
     /**********************************************/
@@ -338,9 +335,13 @@ namespace dxvk {
       { "d3d9.memoryTrackTest",             "True" },
     }} },
     /* Dead Space uses the a NULL render target instead
-       of a 1x1 one if DF24 is NOT supported      */
+       of a 1x1 one if DF24 is NOT supported     
+       Mouse and physics issues above 60 FPS
+       Built-in Vsync Locks the game to 30 FPS    */
     { R"(\\Dead Space\.exe$)", {{
       { "d3d9.supportDFFormats",                 "False" },
+      { "d3d9.maxFrameRate",                     "60" },
+      { "d3d9.presentInterval",                  "1" },
     }} },
     /* Halo CE/HaloPC                             */
     { R"(\\halo(ce)?\.exe$)", {{
@@ -384,15 +385,6 @@ namespace dxvk {
     /* Skyrim (NVAPI)                             */
     { R"(\\TESV\.exe$)", {{
       { "d3d9.customVendorId",              "1002" },
-    }} },
-    /* RTHDRIBL Demo                              
-       Uses DONOTWAIT after GetRenderTargetData
-       then goes into an infinite loop if it gets
-       D3DERR_WASSTILLDRAWING.
-       This is a better solution than penalizing
-       other apps that use this properly.         */
-    { R"(\\rthdribl\.exe$)", {{
-      { "d3d9.allowDoNotWait",              "False" },
     }} },
     /* Hyperdimension Neptunia U: Action Unleashed */
     { R"(\\Neptunia\.exe$)", {{
@@ -517,7 +509,7 @@ namespace dxvk {
       { "d3d9.floatEmulation",              "Strict" },
     }} },
     /* Resident Evil games                      */
-    { R"(\\(rerev|rerev2|re0hd|bhd|re5dx9|BH6)\.exe$)", {{
+    { R"(\\(rerev|rerev2|re0hd|bhd|re5dx9)\.exe$)", {{
       { "d3d9.allowDirectBufferMapping",                "False" },
     }} },
     /* Limbo                                    */
@@ -561,13 +553,46 @@ namespace dxvk {
     { R"(\\eoa\.exe$)", {{
       { "d3d9.customVendorId",              "10de" },
     }} },
-    /* Supreme Commander.                       */
-    { R"(\\SupremeCommander\.exe$)", {{
-      { "d3d9.floatEmulation",        "Strict" },
+    /* Supreme Commander & Forged Alliance Forever */
+    { R"(\\(SupremeCommander|ForgedAlliance)\.exe$)", {{
+      { "d3d9.floatEmulation",            "Strict" },
     }} },
     /* Star Wars The Old Republic */
     { R"(\\swtor\.exe$)", {{
       { "d3d9.forceSamplerTypeSpecConstants", "True" },
+    }} },
+    /* Bionic Commando                          
+       Physics break at high fps               */
+    { R"(\\bionic_commando\.exe$)", {{
+      { "d3d9.maxFrameRate",                "60" },
+    }} },
+    /* Need For Speed 3 modern patch            */
+    { R"(\\nfs3\.exe$)", {{
+      { "d3d9.enableDialogMode",          "True" },
+    }} },
+    /* Ninja Blade                              *
+     * Transparent main character on Nvidia     */
+    { R"(\\NinjaBlade\.exe$)", {{
+      { "d3d9.alphaTestWiggleRoom",       "True" },
+    }} },
+    /* YS Origin                                *
+     * Helps very bad frametimes in some areas  */
+    { R"(\\yso_win\.exe$)", {{
+      { "d3d9.maxFrameLatency",              "1" },
+    }} },
+    /* Saints Row 2 - Prevents unmap crash      */
+    { R"(\\SR2_pc\.exe$)", {{
+      { "d3d9.textureMemory",                "0" },
+    }} },
+    /* Witcher 1: Very long loading times       */
+    { R"(\\witcher\.exe$)", {{
+      { "d3d9.apitraceMode",              "True" },
+    }} },
+    /* Guitar Hero World Tour                   *
+     * Very prone to address space crashes      */
+    { R"(\\(GHWT|GHWT_Definitive)\.exe$)", {{
+      { "d3d9.textureMemory",               "16" },
+      { "d3d9.allowDirectBufferMapping",    "False" },
     }} },
   }};
 
@@ -727,6 +752,68 @@ namespace dxvk {
   
   bool Config::parseOptionValue(
     const std::string&  value,
+          float&        result) {
+    if (value.size() == 0)
+      return false;
+
+    // Parse sign
+    size_t pos = 0;
+    bool negate = false;
+
+    if (value[0] == '-') {
+      negate = true;
+
+      if (++pos == value.size())
+        return false;
+    }
+
+    // Parse integer part
+    uint64_t intPart = 0;
+
+    if (value[pos] == '.')
+      return false;
+
+    while (pos < value.size()) {
+      if (value[pos] == '.') {
+        if (++pos == value.size())
+          return false;
+        break;
+      }
+
+      if (value[pos] < '0' || value[pos] > '9')
+        return false;
+
+      intPart *= 10;
+      intPart += value[pos] - '0';
+      pos += 1;
+    }
+
+    // Parse fractional part
+    uint64_t fractPart = 0;
+    uint64_t fractDivisor = 1;
+
+    while (pos < value.size()) {
+      if (value[pos] < '0' || value[pos] > '9')
+        return false;
+
+      fractDivisor *= 10;
+      fractPart *= 10;
+      fractPart += value[pos] - '0';
+      pos += 1;
+    }
+
+    // Compute final number, not super accurate but this should do
+    result = float((double(fractPart) / double(fractDivisor)) + double(intPart));
+
+    if (negate)
+      result = -result;
+
+    return std::isfinite(result);
+  }
+
+
+  bool Config::parseOptionValue(
+    const std::string&  value,
           Tristate&     result) {
     static const std::array<std::pair<const char*, Tristate>, 3> s_lookup = {{
       { "true",  Tristate::True  },
@@ -768,6 +855,10 @@ namespace dxvk {
     if (appConfig != g_appDefaults.end()) {
       // Inform the user that we loaded a default config
       Logger::info(str::format("Found built-in config:"));
+
+      for (auto& pair : appConfig->second.m_options)
+        Logger::info(str::format("  ", pair.first, " = ", pair.second));
+
       return appConfig->second;
     }
 
@@ -785,7 +876,7 @@ namespace dxvk {
       filePath = "dxvk.conf";
     
     // Open the file if it exists
-    std::ifstream stream(str::tows(filePath.c_str()).c_str());
+    std::ifstream stream(str::topath(filePath.c_str()).c_str());
 
     if (!stream)
       return config;

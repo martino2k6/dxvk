@@ -67,7 +67,7 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
     }
 
-    GUID guid          = bit::cast<GUID>(m_adapter->devicePropertiesExt().coreDeviceId.deviceUUID);
+    GUID guid          = bit::cast<GUID>(m_adapter->devicePropertiesExt().vk11.deviceUUID);
 
     uint32_t vendorId  = options.customVendorId == -1     ? props.vendorID   : uint32_t(options.customVendorId);
     uint32_t deviceId  = options.customDeviceId == -1     ? props.deviceID   : uint32_t(options.customDeviceId);
@@ -195,9 +195,8 @@ namespace dxvk {
     // Therefore...
     VkSampleCountFlags sampleFlags = VkSampleCountFlags(sampleCount);
 
-    auto availableFlags = !IsDepthFormat(SurfaceFormat)
-      ? m_adapter->deviceProperties().limits.framebufferColorSampleCounts
-      : m_adapter->deviceProperties().limits.framebufferDepthSampleCounts;
+    auto availableFlags = m_adapter->deviceProperties().limits.framebufferColorSampleCounts
+                        & m_adapter->deviceProperties().limits.framebufferDepthSampleCounts;
 
     if (!(availableFlags & sampleFlags))
       return D3DERR_NOTAVAILABLE;
@@ -236,7 +235,8 @@ namespace dxvk {
           D3DDEVTYPE DeviceType,
           D3D9Format SourceFormat,
           D3D9Format TargetFormat) {
-    bool sourceSupported = IsSupportedBackBufferFormat(D3D9Format::Unknown, SourceFormat, TRUE);
+    bool sourceSupported = SourceFormat != D3D9Format::Unknown
+                        && IsSupportedBackBufferFormat(SourceFormat);
     bool targetSupported = TargetFormat == D3D9Format::X1R5G5B5
                         || TargetFormat == D3D9Format::A1R5G5B5
                         || TargetFormat == D3D9Format::R5G6B5
@@ -702,10 +702,10 @@ namespace dxvk {
     if (pLUID == nullptr)
       return D3DERR_INVALIDCALL;
 
-    auto& deviceId = m_adapter->devicePropertiesExt().coreDeviceId;
+    auto& vk11 = m_adapter->devicePropertiesExt().vk11;
 
-    if (deviceId.deviceLUIDValid)
-      *pLUID = bit::cast<LUID>(deviceId.deviceLUID);
+    if (vk11.deviceLUIDValid)
+      *pLUID = bit::cast<LUID>(vk11.deviceLUID);
     else
       *pLUID = dxvk::GetAdapterLUID(m_ordinal);
 

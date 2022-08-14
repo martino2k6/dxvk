@@ -27,6 +27,8 @@ dxvk_shaders = files([
   'shaders/dxvk_copy_depth_stencil_2d.frag',
   'shaders/dxvk_copy_depth_stencil_ms.frag',
 
+  'shaders/dxvk_dummy_frag.frag',
+
   'shaders/dxvk_fullscreen_geom.geom',
   'shaders/dxvk_fullscreen_vert.vert',
   'shaders/dxvk_fullscreen_layer_vert.vert',
@@ -71,6 +73,7 @@ dxvk_src = files([
   'dxvk_device.cpp',
   'dxvk_device_filter.cpp',
   'dxvk_extensions.cpp',
+  'dxvk_fence.cpp',
   'dxvk_format.cpp',
   'dxvk_framebuffer.cpp',
   'dxvk_gpu_event.cpp',
@@ -89,17 +92,14 @@ dxvk_src = files([
   'dxvk_openvr.cpp',
   'dxvk_openxr.cpp',
   'dxvk_options.cpp',
-  'dxvk_pipecache.cpp',
   'dxvk_pipelayout.cpp',
   'dxvk_pipemanager.cpp',
   'dxvk_queue.cpp',
-  'dxvk_renderpass.cpp',
   'dxvk_resource.cpp',
   'dxvk_sampler.cpp',
   'dxvk_shader.cpp',
   'dxvk_shader_key.cpp',
   'dxvk_signal.cpp',
-  'dxvk_spec_const.cpp',
   'dxvk_staging.cpp',
   'dxvk_state_cache.cpp',
   'dxvk_stats.cpp',
@@ -119,7 +119,7 @@ thread_dep = dependency('threads')
 
 dxvk_lib = static_library('dxvk', dxvk_src, glsl_generator.process(dxvk_shaders), dxvk_version,
   link_with           : [ util_lib, spirv_lib ],
-  dependencies        : [ thread_dep, vkcommon_dep ] + dxvk_extradep,
+  dependencies        : [ thread_dep, vkcommon_dep ],
   include_directories : [ dxvk_include_path ],
 )
 

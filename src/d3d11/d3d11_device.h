@@ -31,7 +31,6 @@ namespace dxvk {
   class D3D11CommonShader;
   class D3D11CommonTexture;
   class D3D11Counter;
-  class D3D11DeviceContext;
   class D3D11DXGIDevice;
   class D3D11ImmediateContext;
   class D3D11Predicate;
@@ -260,7 +259,7 @@ namespace dxvk {
     HRESULT STDMETHODCALLTYPE CreateFence(
             UINT64                      InitialValue,
             D3D11_FENCE_FLAG            Flags,
-            REFIID                      ReturnedInterface,
+            REFIID                      riid,
             void**                      ppFence);
 
     void STDMETHODCALLTYPE ReadFromSubresource(

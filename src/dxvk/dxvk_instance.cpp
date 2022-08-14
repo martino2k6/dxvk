@@ -61,9 +61,9 @@ namespace dxvk {
 
   Rc<DxvkAdapter> DxvkInstance::findAdapterByLuid(const void* luid) const {
     for (const auto& adapter : m_adapters) {
-      const auto& props = adapter->devicePropertiesExt().coreDeviceId;
+      const auto& vk11 = adapter->devicePropertiesExt().vk11;
 
-      if (props.deviceLUIDValid && !std::memcmp(luid, props.deviceLUID, VK_LUID_SIZE))
+      if (vk11.deviceLUIDValid && !std::memcmp(luid, vk11.deviceLUID, VK_LUID_SIZE))
         return adapter;
     }
 
@@ -122,22 +122,14 @@ namespace dxvk {
 
     std::string appName = env::getExeName();
     
-    VkApplicationInfo appInfo;
-    appInfo.sType                 = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pNext                 = nullptr;
+    VkApplicationInfo appInfo = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     appInfo.pApplicationName      = appName.c_str();
-    appInfo.applicationVersion    = 0;
     appInfo.pEngineName           = "DXVK";
-    appInfo.engineVersion         = VK_MAKE_VERSION(1, 10, 1);
-    appInfo.apiVersion            = VK_MAKE_VERSION(1, 1, 0);
+    appInfo.engineVersion         = VK_MAKE_VERSION(2, 0, 0);
+    appInfo.apiVersion            = VK_MAKE_VERSION(1, 3, 0);
     
-    VkInstanceCreateInfo info;
-    info.sType                    = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    info.pNext                    = nullptr;
-    info.flags                    = 0;
+    VkInstanceCreateInfo info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
     info.pApplicationInfo         = &appInfo;
-    info.enabledLayerCount        = 0;
-    info.ppEnabledLayerNames      = nullptr;
     info.enabledExtensionCount    = extensionNameList.count();
     info.ppEnabledExtensionNames  = extensionNameList.names();
     

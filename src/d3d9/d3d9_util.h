@@ -95,9 +95,10 @@ namespace dxvk {
           ID3DBlob** ppDisassembly);
 
   HRESULT DecodeMultiSampleType(
-        D3DMULTISAMPLE_TYPE       MultiSample,
-        DWORD                     MultisampleQuality,
-        VkSampleCountFlagBits*    pCount);
+    const Rc<DxvkDevice>&           pDevice,
+          D3DMULTISAMPLE_TYPE       MultiSample,
+          DWORD                     MultisampleQuality,
+          VkSampleCountFlagBits*    pSampleCount);
 
   VkFormat GetPackedDepthStencilFormat(D3D9Format Format);
 
@@ -109,7 +110,7 @@ namespace dxvk {
     return srgb ? srgbFormat : format;
   }
 
-  inline VkShaderStageFlagBits GetShaderStage(DxsoProgramType ProgramType) {
+  constexpr VkShaderStageFlagBits GetShaderStage(DxsoProgramType ProgramType) {
     switch (ProgramType) {
       case DxsoProgramTypes::VertexShader:  return VK_SHADER_STAGE_VERTEX_BIT;
       case DxsoProgramTypes::PixelShader:   return VK_SHADER_STAGE_FRAGMENT_BIT;

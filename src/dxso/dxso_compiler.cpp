@@ -9,8 +9,6 @@
 #include "../d3d9/d3d9_fixed_function.h"
 #include "dxso_util.h"
 
-#include "../dxvk/dxvk_spec_const.h"
-
 #include <cfloat>
 
 namespace dxvk {
@@ -216,44 +214,23 @@ namespace dxvk {
     // Declare the entry point, we now have all the
     // information we need, including the interfaces
     m_module.addEntryPoint(m_entryPointId,
-      m_programInfo.executionModel(), "main",
-      m_entryPointInterfaces.size(),
-      m_entryPointInterfaces.data());
+      m_programInfo.executionModel(), "main");
     m_module.setDebugName(m_entryPointId, "main");
   }
 
 
-  DxsoPermutations DxsoCompiler::compile() {
-    DxsoPermutations permutations = { };
-
-    // Create the shader module object
-    permutations[D3D9ShaderPermutations::None] = compileShader();
-
-    // If we need to add more permuations, might be worth making a copy of module
-    // before we do anything more. :-)
-    if (m_programInfo.type() == DxsoProgramType::PixelShader) {
-      if (m_ps.diffuseColorIn)
-        m_module.decorate(m_ps.diffuseColorIn, spv::DecorationFlat);
-
-      if (m_ps.specularColorIn)
-        m_module.decorate(m_ps.specularColorIn, spv::DecorationFlat);
-
-      permutations[D3D9ShaderPermutations::FlatShade] = compileShader();
-    }
-
-    return permutations;
-  }
-
-
-  Rc<DxvkShader> DxsoCompiler::compileShader() {
+  Rc<DxvkShader> DxsoCompiler::compile() {
     DxvkShaderCreateInfo info;
     info.stage = m_programInfo.shaderStage();
-    info.resourceSlotCount = m_resourceSlots.size();
-    info.resourceSlots = m_resourceSlots.data();
+    info.bindingCount = m_bindings.size();
+    info.bindings = m_bindings.data();
     info.inputMask = m_inputMask;
     info.outputMask = m_outputMask;
     info.pushConstOffset = m_pushConstOffset;
-    info.pushConstSize = m_pushConstOffset;
+    info.pushConstSize = m_pushConstSize;
+
+    if (m_programInfo.type() == DxsoProgramTypes::PixelShader)
+      info.flatShadingInputs = m_ps.flatShadingMask;
 
     return new DxvkShader(info, m_module.compile());
   }
@@ -270,10 +247,6 @@ namespace dxvk {
     } else {
       this->emitDclConstantBuffer();
     }
-
-    m_depthSpecConstant = m_module.specConst32(m_module.defIntType(32, 0), 0);
-    m_module.decorateSpecId(m_depthSpecConstant, getSpecId(D3D9SpecConstantId::SamplerDepthMode));
-    m_module.setDebugName(m_depthSpecConstant, "depthSamplers");
 
     this->emitDclInputArray();
 
@@ -330,19 +303,11 @@ namespace dxvk {
     m_module.decorateDescriptorSet(m_cBuffer, 0);
     m_module.decorateBinding(m_cBuffer, bindingId);
 
-    DxvkResourceSlot resource;
-    resource.slot   = bindingId;
-    resource.type   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    resource.view   = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
-    resource.access = VK_ACCESS_UNIFORM_READ_BIT;
-    m_resourceSlots.push_back(resource);
-
-    m_boolSpecConstant = m_module.specConst32(m_module.defIntType(32, 0), 0);
-    m_module.decorateSpecId(m_boolSpecConstant, getSpecId(
-      m_programInfo.type() == DxsoProgramType::VertexShader
-      ? D3D9SpecConstantId::VertexShaderBools
-      : D3D9SpecConstantId::PixelShaderBools));
-    m_module.setDebugName(m_boolSpecConstant, "boolConstants");
+    DxvkBindingInfo binding = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER };
+    binding.resourceBinding = bindingId;
+    binding.viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+    binding.access          = VK_ACCESS_UNIFORM_READ_BIT;
+    m_bindings.push_back(binding);
   }
 
   template<DxsoConstantBufferType ConstantBufferType>
@@ -424,14 +389,16 @@ namespace dxvk {
     if (asSsbo)
       m_module.decorate(constantBufferId, spv::DecorationNonWritable);
 
-    DxvkResourceSlot resource;
-    resource.slot   = bindingId;
-    resource.type   = asSsbo
+    DxvkBindingInfo binding = { };
+    binding.descriptorType  = asSsbo
       ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
       : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    resource.view   = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
-    resource.access = asSsbo ? VK_ACCESS_MEMORY_READ_BIT : VK_ACCESS_UNIFORM_READ_BIT;
-    m_resourceSlots.push_back(resource);
+    binding.resourceBinding = bindingId;
+    binding.viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+    binding.access          = asSsbo
+      ? VK_ACCESS_SHADER_READ_BIT
+      : VK_ACCESS_UNIFORM_READ_BIT;
+    m_bindings.push_back(binding);
 
     return constantBufferId;
   }
@@ -491,6 +458,8 @@ namespace dxvk {
 
     this->setupRenderStateInfo();
 
+    m_specUbo = SetupSpecUBO(m_module, m_bindings);
+
     this->emitFunctionBegin(
       m_vs.functionId,
       m_module.defVoidType(),
@@ -510,12 +479,11 @@ namespace dxvk {
     m_module.decorateDescriptorSet(m_ps.sharedState, 0);
     m_module.decorateBinding(m_ps.sharedState, bindingId);
 
-    DxvkResourceSlot resource;
-    resource.slot   = bindingId;
-    resource.type   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    resource.view   = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
-    resource.access = VK_ACCESS_UNIFORM_READ_BIT;
-    m_resourceSlots.push_back(resource);
+    DxvkBindingInfo binding = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER };
+    binding.resourceBinding = bindingId;
+    binding.viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+    binding.access          = VK_ACCESS_UNIFORM_READ_BIT;
+    m_bindings.push_back(binding);
   }
 
 
@@ -530,24 +498,10 @@ namespace dxvk {
     m_ps.functionId = m_module.allocateId();
     m_module.setDebugName(m_ps.functionId, "ps_main");
 
-    if (m_programInfo.majorVersion() < 2 || m_moduleInfo.options.forceSamplerTypeSpecConstants) {
-      m_ps.samplerTypeSpec = m_module.specConst32(m_module.defIntType(32, 0), 0);
-      m_module.decorateSpecId(m_ps.samplerTypeSpec, getSpecId(D3D9SpecConstantId::SamplerType));
-      m_module.setDebugName(m_ps.samplerTypeSpec, "s_sampler_types");
-
-      if (m_programInfo.majorVersion() < 2) {
-        m_ps.projectionSpec = m_module.specConst32(m_module.defIntType(32, 0), 0);
-        m_module.decorateSpecId(m_ps.projectionSpec, getSpecId(D3D9SpecConstantId::ProjectionType));
-        m_module.setDebugName(m_ps.projectionSpec, "s_projections");
-      }
-    }
-
-    m_ps.fetch4Spec = m_module.specConst32(m_module.defIntType(32, 0), 0);
-    m_module.decorateSpecId(m_ps.fetch4Spec, getSpecId(D3D9SpecConstantId::Fetch4));
-    m_module.setDebugName(m_ps.fetch4Spec, "s_fetch4");
-
     this->setupRenderStateInfo();
     this->emitPsSharedConstants();
+
+    m_specUbo = SetupSpecUBO(m_module, m_bindings);
 
     this->emitFunctionBegin(
       m_ps.functionId,
@@ -660,7 +614,6 @@ namespace dxvk {
      && info.sclass == spv::StorageClassInput)
       m_module.decorate(varId, spv::DecorationFlat);
 
-    m_entryPointInterfaces.push_back(varId);
     return varId;
   }
 
@@ -844,20 +797,14 @@ namespace dxvk {
       }
     }
 
-    DxsoSampler& sampler = m_samplers[idx];
-    sampler.boundConst = m_module.specConstBool(true);
-    sampler.type = type;
-    m_module.decorateSpecId(sampler.boundConst, binding);
-    m_module.setDebugName(sampler.boundConst,
-      str::format("s", idx, "_bound").c_str());
+    m_samplers[idx].type = type;
 
     // Store descriptor info for the shader interface
-    DxvkResourceSlot resource;
-    resource.slot   = binding;
-    resource.type   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    resource.view   = implicit ? VK_IMAGE_VIEW_TYPE_MAX_ENUM : viewType;
-    resource.access = VK_ACCESS_SHADER_READ_BIT;
-    m_resourceSlots.push_back(resource);
+    DxvkBindingInfo bindingInfo = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
+    bindingInfo.resourceBinding = binding;
+    bindingInfo.viewType        = implicit ? VK_IMAGE_VIEW_TYPE_MAX_ENUM : viewType;
+    bindingInfo.access          = VK_ACCESS_SHADER_READ_BIT;
+    m_bindings.push_back(bindingInfo);
   }
 
 
@@ -1050,7 +997,7 @@ namespace dxvk {
       uint32_t uvec4Type = getVectorTypeId({ DxsoScalarType::Uint32, 4 });
 
       // If not SWVP, spec const this
-      uint32_t bitfield;
+      uint32_t bit;
       if (m_layout->bitmaskCount != 1) {
         std::array<uint32_t, 2> indices = { m_module.constu32(0), m_module.constu32(reg.id.num / 128) };
 
@@ -1061,19 +1008,22 @@ namespace dxvk {
           m_module.defPointerType(accessType, spv::StorageClassUniform),
           m_cBoolBuffer, indexCount, indices.data());
 
-        bitfield = m_module.opLoad(accessType, ptrId);
-      }
-      else
-        bitfield = m_boolSpecConstant;
+        uint32_t bitfield = m_module.opLoad(accessType, ptrId);
+        uint32_t bitIdx = m_module.consti32(reg.id.num % 32);
 
-      uint32_t bitIdx = m_module.consti32(reg.id.num % 32);
-
-      if (m_layout->bitmaskCount != 1) {
         uint32_t index = (reg.id.num % 128) / 32;
         bitfield = m_module.opCompositeExtract(uintType, bitfield, 1, &index);
+
+        bit = m_module.opBitFieldUExtract(
+          uintType, bitfield, bitIdx, m_module.consti32(1));
       }
-      uint32_t bit = m_module.opBitFieldUExtract(
-        uintType, bitfield, bitIdx, m_module.consti32(1));
+      else {
+        bit = m_spec.get(m_module, m_specUbo,
+          m_programInfo.type() == DxsoProgramType::VertexShader
+            ? SpecVertexShaderBools
+            : SpecPixelShaderBools,
+          reg.id.num, 1);
+      }
 
       result.id = m_module.opINotEqual(
         getVectorTypeId(result.type),
@@ -1210,8 +1160,6 @@ namespace dxvk {
                 input ? 0 : m_module.constf32(1.0f),
                 input ? spv::StorageClassInput : spv::StorageClassOutput);
 
-              m_entryPointInterfaces.push_back(m_fog.id);
-
               m_module.decorateLocation(m_fog.id, slot);
             }
             return m_fog;
@@ -1246,7 +1194,6 @@ namespace dxvk {
           m_module.decorateLocation(m_ps.oColor[idx].id, idx);
           m_module.decorateIndex(m_ps.oColor[idx].id, 0);
 
-          m_entryPointInterfaces.push_back(m_ps.oColor[idx].id);
           m_usedRTs |= (1u << idx);
         }
         return m_ps.oColor[idx];
@@ -2796,11 +2743,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       // Of course it does...
       uint32_t bool_t = m_module.defBoolType();
 
-      uint32_t shouldProj = m_module.opBitFieldUExtract(
-        m_module.defIntType(32, 0), m_ps.projectionSpec,
-        m_module.consti32(samplerIdx), m_module.consti32(1));
-
-      shouldProj = m_module.opIEqual(bool_t, shouldProj, m_module.constu32(1));
+      uint32_t shouldProj = m_spec.get(m_module, m_specUbo, SpecProjectionType, samplerIdx, 1);
+      shouldProj = m_module.opINotEqual(bool_t, shouldProj, m_module.constu32(0));
 
       uint32_t bvec4_t = m_module.defVectorType(bool_t, 4);
       std::array<uint32_t, 4> indices = { shouldProj, shouldProj, shouldProj, shouldProj };
@@ -2893,7 +2837,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
     DxsoSampler sampler = m_samplers.at(samplerIdx);
 
-    auto SampleImage = [this, opcode, dst, ctx, samplerIdx, GetProjectionValue](DxsoRegisterValue texcoordVar, DxsoSamplerInfo& sampler, bool depth, DxsoSamplerType samplerType, uint32_t specConst) {
+    auto SampleImage = [this, opcode, dst, ctx, samplerIdx, GetProjectionValue](DxsoRegisterValue texcoordVar, DxsoSamplerInfo& sampler, bool depth, DxsoSamplerType samplerType, uint32_t isNull) {
       DxsoRegisterValue result;
       result.type.ctype  = dst.type.ctype;
       result.type.ccount = depth ? 1 : 4;
@@ -2963,12 +2907,10 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
       uint32_t fetch4 = 0;
       if (m_programInfo.type() == DxsoProgramType::PixelShader && samplerType != SamplerTypeTexture3D) {
-        fetch4 = m_module.opBitFieldUExtract(
-          m_module.defIntType(32, 0), m_ps.fetch4Spec,
-          m_module.consti32(samplerIdx), m_module.consti32(1));
+        fetch4 = m_spec.get(m_module, m_specUbo, SpecFetch4, samplerIdx, 1);
 
         uint32_t bool_t = m_module.defBoolType();
-        fetch4 = m_module.opIEqual(bool_t, fetch4, m_module.constu32(1));
+        fetch4 = m_module.opINotEqual(bool_t, fetch4, m_module.constu32(0));
 
         uint32_t bvec4_t = m_module.defVectorType(bool_t, 4);
         std::array<uint32_t, 4> indices = { fetch4, fetch4, fetch4, fetch4 };
@@ -2996,11 +2938,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
           fetch4,
           imageOperands);
 
-        uint32_t shouldProj = m_module.opBitFieldUExtract(
-          m_module.defIntType(32, 0), m_ps.projectionSpec,
-          m_module.consti32(samplerIdx), m_module.consti32(1));
-
-        shouldProj = m_module.opIEqual(m_module.defBoolType(), shouldProj, m_module.constu32(1));
+        uint32_t shouldProj = m_spec.get(m_module, m_specUbo, SpecProjectionType, samplerIdx, 1);
+        shouldProj = m_module.opINotEqual(m_module.defBoolType(), shouldProj, m_module.constu32(0));
 
         // Depth  -> .x
         // Colour -> .xyzw
@@ -3016,12 +2955,12 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
       // If we are sampling depth we've already specc'ed this!
       // This path is always size 4 because it only hits on color.
-      if (specConst != 0) {
+      if (isNull != 0) {
         uint32_t bool_t = m_module.defBoolType();
         uint32_t bvec4_t = m_module.defVectorType(bool_t, 4);
-        std::array<uint32_t, 4> indices = { specConst, specConst, specConst, specConst };
-        specConst = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
-        result.id = m_module.opSelect(typeId, specConst, result.id, m_module.constvec4f32(0.0f, 0.0f, 0.0f, 1.0f));
+        std::array<uint32_t, 4> indices = { isNull, isNull, isNull, isNull };
+        isNull = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
+        result.id = m_module.opSelect(typeId, isNull, m_module.constvec4f32(0.0f, 0.0f, 0.0f, 1.0f), result.id);
       }
 
       // Apply operand swizzle to the operand value
@@ -3056,6 +2995,13 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     };
 
     auto SampleType = [&](DxsoSamplerType samplerType) {
+      uint32_t bitOffset = m_programInfo.type() == DxsoProgramTypes::VertexShader
+        ? samplerIdx + caps::MaxTexturesPS
+        : samplerIdx;
+
+      uint32_t isNull = m_spec.get(m_module, m_specUbo, SpecSamplerNull, bitOffset, 1);
+      isNull = m_module.opINotEqual(m_module.defBoolType(), isNull, m_module.constu32(0));
+
       // Only do the check for depth comp. samplers
       // if we aren't a 3D texture
       if (samplerType != SamplerTypeTexture3D) {
@@ -3063,17 +3009,14 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         uint32_t depthLabel  = m_module.allocateId();
         uint32_t endLabel    = m_module.allocateId();
 
-        uint32_t typeId = m_module.defIntType(32, 0);
-        uint32_t offset  = m_module.consti32(m_programInfo.type() == DxsoProgramTypes::VertexShader ? samplerIdx + 17 : samplerIdx);
-        uint32_t bitCnt  = m_module.consti32(1);
-        uint32_t isDepth = m_module.opBitFieldUExtract(typeId, m_depthSpecConstant, offset, bitCnt);
-        isDepth = m_module.opIEqual(m_module.defBoolType(), isDepth, m_module.constu32(1));
+        uint32_t isDepth = m_spec.get(m_module, m_specUbo, SpecSamplerDepthMode, bitOffset, 1);
+        isDepth = m_module.opINotEqual(m_module.defBoolType(), isDepth, m_module.constu32(0));
 
         m_module.opSelectionMerge(endLabel, spv::SelectionControlMaskNone);
         m_module.opBranchConditional(isDepth, depthLabel, colorLabel);
 
         m_module.opLabel(colorLabel);
-        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, sampler.boundConst);
+        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, isNull);
         m_module.opBranch(endLabel);
 
         m_module.opLabel(depthLabel);
@@ -3084,7 +3027,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         m_module.opLabel(endLabel);
       }
       else
-        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, sampler.boundConst);
+        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, isNull);
     };
 
     if (m_programInfo.majorVersion() >= 2 && !m_moduleInfo.options.forceSamplerTypeSpecConstants) {
@@ -3101,12 +3044,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       }};
 
       uint32_t switchEndLabel = m_module.allocateId();
-
-      uint32_t typeId = m_module.defIntType(32, 0);
-
-      uint32_t offset  = m_module.consti32(samplerIdx * 2);
-      uint32_t bitCnt  = m_module.consti32(2);
-      uint32_t type    = m_module.opBitFieldUExtract(typeId, m_ps.samplerTypeSpec, offset, bitCnt);
+      uint32_t type = m_spec.get(m_module, m_specUbo, SpecSamplerType, samplerIdx * 2, 2);
 
       m_module.opSelectionMerge(switchEndLabel, spv::SelectionControlMaskNone);
       m_module.opSwitch(type,
@@ -3369,8 +3307,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     D3D9PointSizeInfoPS pointInfo;
 
     if (m_programInfo.type() == DxsoProgramType::PixelShader) {
-      pointCoord = GetPointCoord(m_module, m_entryPointInterfaces);
-      pointInfo  = GetPointSizeInfoPS(m_module, m_rsBlock);
+      pointCoord = GetPointCoord(m_module);
+      pointInfo  = GetPointSizeInfoPS(m_spec, m_module, m_rsBlock, m_specUbo);
     }
 
     for (uint32_t i = 0; i < m_isgn.elemCount; i++) {
@@ -3396,8 +3334,6 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
       if (elem.centroid)
         m_module.decorate(inputPtr.id, spv::DecorationCentroid);
-
-      m_entryPointInterfaces.push_back(inputPtr.id);
 
       uint32_t typeId    = this->getVectorTypeId({ DxsoScalarType::Float32, 4 });
       uint32_t ptrTypeId = m_module.defPointerType(typeId, spv::StorageClassPrivate);
@@ -3438,10 +3374,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         workingReg.id = m_module.opSelect(getVectorTypeId(workingReg.type), pointInfo.isSprite, pointCoord, workingReg.id);
 
       if (m_programInfo.type() == DxsoProgramType::PixelShader && elem.semantic.usage == DxsoUsage::Color) {
-        if (elem.semantic.usageIndex == 0)
-          m_ps.diffuseColorIn = inputPtr.id;
-        else if (elem.semantic.usageIndex == 1)
-          m_ps.specularColorIn = inputPtr.id;
+        if (elem.semantic.usageIndex < 2)
+          m_ps.flatShadingMask |= 1u << slot;
       }
 
       m_module.opStore(indexPtr.id, workingReg.id);
@@ -3517,8 +3451,6 @@ void DxsoCompiler::emitControlFlowGenericLoop(
           m_vs.oPSize = outputPtr;
         }
       }
-
-      m_entryPointInterfaces.push_back(outputPtr.id);
 
       uint32_t typeId    = this->getVectorTypeId({ DxsoScalarType::Float32, 4 });
       uint32_t ptrTypeId = m_module.defPointerType(typeId, spv::StorageClassPrivate);
@@ -3596,7 +3528,6 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_module.setDebugName(outputPtr, name.c_str());
 
       m_outputMask |= 1u << slot;
-      m_entryPointInterfaces.push_back(outputPtr);
     };
 
     if (!outputtedColor0)
@@ -3605,7 +3536,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     if (!outputtedColor1)
       OutputDefault(DxsoSemantic{ DxsoUsage::Color, 1 });
 
-    auto pointInfo = GetPointSizeInfoVS(m_module, m_vs.oPos.id, 0, 0, m_rsBlock, false);
+    auto pointInfo = GetPointSizeInfoVS(m_spec, m_module, m_vs.oPos.id, 0, 0, m_rsBlock, m_specUbo, false);
 
     if (m_vs.oPSize.id == 0) {
       m_vs.oPSize = this->emitRegisterPtr(
@@ -3652,13 +3583,12 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     m_module.decorateDescriptorSet(clipPlaneBlock, 0);
     m_module.decorateBinding      (clipPlaneBlock, bindingId);
     
-    DxvkResourceSlot resource;
-    resource.slot   = bindingId;
-    resource.type   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    resource.view   = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
-    resource.access = VK_ACCESS_UNIFORM_READ_BIT;
-    m_resourceSlots.push_back(resource);
-    
+    DxvkBindingInfo binding = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER };
+    binding.resourceBinding = bindingId;
+    binding.viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+    binding.access          = VK_ACCESS_UNIFORM_READ_BIT;
+    m_bindings.push_back(binding);
+
     // Declare output array for clip distances
     uint32_t clipDistArray = m_module.newVar(
       m_module.defPointerType(
@@ -3667,7 +3597,6 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       spv::StorageClassOutput);
 
     m_module.decorateBuiltIn(clipDistArray, spv::BuiltInClipDistance);
-    m_entryPointInterfaces.push_back(clipDistArray);
 
     if (m_moduleInfo.options.invariantPosition)
       m_module.decorate(m_vs.oPos.id, spv::DecorationInvariant);
@@ -3758,8 +3687,9 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     fogCtx.IsPositionT = false;
     fogCtx.HasSpecular = false;
     fogCtx.Specular    = 0;
+    fogCtx.SpecUBO     = m_specUbo;
 
-    m_module.opStore(oColor0Ptr.id, DoFixedFunctionFog(m_module, fogCtx));
+    m_module.opStore(oColor0Ptr.id, DoFixedFunctionFog(m_spec, m_module, fogCtx));
   }
 
   
@@ -3768,9 +3698,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     uint32_t floatType = m_module.defFloatType(32);
     uint32_t floatPtr  = m_module.defPointerType(floatType, spv::StorageClassPushConstant);
     
-    uint32_t alphaFuncId = m_module.specConst32(m_module.defIntType(32, 0), 0);
-    m_module.setDebugName   (alphaFuncId, "alpha_func");
-    m_module.decorateSpecId (alphaFuncId, getSpecId(D3D9SpecConstantId::AlphaCompareOp));
+    uint32_t alphaFuncId = m_spec.get(m_module, m_specUbo, SpecAlphaCompareOp);
 
     // Implement alpha test and fog
     DxsoRegister color0;

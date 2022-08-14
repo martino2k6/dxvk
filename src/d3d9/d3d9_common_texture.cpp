@@ -40,7 +40,8 @@ namespace dxvk {
     m_shadow         = DetermineShadowState();
     m_supportsFetch4 = DetermineFetch4Compatibility();
 
-    if (m_mapMode == D3D9_COMMON_TEXTURE_MAP_MODE_BACKED) {
+    const bool createImage = m_desc.Pool != D3DPOOL_SYSTEMMEM && m_desc.Pool != D3DPOOL_SCRATCH && m_desc.Format != D3D9Format::NULL_FORMAT;
+    if (createImage) {
       bool plainSurface = m_type == D3DRTYPE_SURFACE &&
                           !(m_desc.Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL));
 
@@ -73,7 +74,9 @@ namespace dxvk {
       }
     }
 
-    if (m_mapMode == D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM)
+    if (m_mapMode == D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE)
+      AllocData();
+    else if (m_mapMode != D3D9_COMMON_TEXTURE_MAP_MODE_NONE && m_desc.Pool != D3DPOOL_DEFAULT)
       CreateBuffers();
 
     m_exposedMipLevels = m_desc.MipLevels;
@@ -86,6 +89,8 @@ namespace dxvk {
   D3D9CommonTexture::~D3D9CommonTexture() {
     if (m_size != 0)
       m_device->ChangeReportedMemory(m_size);
+
+    m_device->RemoveMappedTexture(this);
   }
 
 
@@ -134,7 +139,7 @@ namespace dxvk {
     if (pDesc->Width == 0 || pDesc->Height == 0 || pDesc->Depth == 0)
       return D3DERR_INVALIDCALL;
     
-    if (FAILED(DecodeMultiSampleType(pDesc->MultiSample, pDesc->MultisampleQuality, nullptr)))
+    if (FAILED(DecodeMultiSampleType(pDevice->GetDXVKDevice(), pDesc->MultiSample, pDesc->MultisampleQuality, nullptr)))
       return D3DERR_INVALIDCALL;
 
     // Using MANAGED pool with DYNAMIC usage is illegal
@@ -165,11 +170,16 @@ namespace dxvk {
     return D3D_OK;
   }
 
+  void* D3D9CommonTexture::GetData(UINT Subresource) {
+    if (unlikely(m_mappedSlices[Subresource].mapPtr != nullptr || m_mapMode != D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE))
+      return m_mappedSlices[Subresource].mapPtr;
 
-  bool D3D9CommonTexture::CreateBufferSubresource(UINT Subresource) {
-    if (m_buffers[Subresource] != nullptr)
-      return false;
+    D3D9Memory& memory = m_data[Subresource];
+    memory.Map();
+    return memory.Ptr();
+  }
 
+  void D3D9CommonTexture::CreateBufferSubresource(UINT Subresource) {
     DxvkBufferCreateInfo info;
     info.size   = GetMipSize(Subresource);
     info.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
@@ -190,8 +200,6 @@ namespace dxvk {
 
     m_buffers[Subresource] = m_device->GetDXVKDevice()->createBuffer(info, memType);
     m_mappedSlices[Subresource] = m_buffers[Subresource]->getSliceHandle();
-
-    return true;
   }
 
 
@@ -199,7 +207,7 @@ namespace dxvk {
     const UINT MipLevel = Subresource % m_desc.MipLevels;
 
     const DxvkFormatInfo* formatInfo = m_mapping.FormatColor != VK_FORMAT_UNDEFINED
-      ? imageFormatInfo(m_mapping.FormatColor)
+      ? lookupFormatInfo(m_mapping.FormatColor)
       : m_device->UnsupportedFormatInfo(m_desc.Format);
 
     const VkExtent3D mipExtent = util::computeMipLevelExtent(
@@ -258,12 +266,12 @@ namespace dxvk {
       imageInfo.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
 
-    DecodeMultiSampleType(m_desc.MultiSample, m_desc.MultisampleQuality, &imageInfo.sampleCount);
+    DecodeMultiSampleType(m_device->GetDXVKDevice(), m_desc.MultiSample, m_desc.MultisampleQuality, &imageInfo.sampleCount);
 
     // The image must be marked as mutable if it can be reinterpreted
     // by a view with a different format. Depth-stencil formats cannot
     // be reinterpreted in Vulkan, so we'll ignore those.
-    auto formatProperties = imageFormatInfo(m_mapping.FormatColor);
+    auto formatProperties = lookupFormatInfo(m_mapping.FormatColor);
 
     bool isMutable     = m_mapping.FormatSrgb != VK_FORMAT_UNDEFINED;
     bool isColorFormat = (formatProperties->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
@@ -477,6 +485,20 @@ namespace dxvk {
     return VK_IMAGE_LAYOUT_GENERAL;
   }
 
+  D3D9_COMMON_TEXTURE_MAP_MODE D3D9CommonTexture::DetermineMapMode() const {
+    if (m_desc.Format == D3D9Format::NULL_FORMAT)
+      return D3D9_COMMON_TEXTURE_MAP_MODE_NONE;
+
+#ifdef D3D9_ALLOW_UNMAPPING
+    if (m_device->GetOptions()->textureMemory != 0 && m_desc.Pool != D3DPOOL_DEFAULT)
+      return D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE;
+#endif
+
+    if (m_desc.Pool == D3DPOOL_SYSTEMMEM || m_desc.Pool == D3DPOOL_SCRATCH)
+      return D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM;
+
+    return D3D9_COMMON_TEXTURE_MAP_MODE_BACKED;
+  }
 
   void D3D9CommonTexture::ExportImageInfo() {
     /* From MSDN:
@@ -541,7 +563,7 @@ namespace dxvk {
     viewInfo.format    = m_mapping.ConversionFormatInfo.FormatColor != VK_FORMAT_UNDEFINED
                        ? PickSRGB(m_mapping.ConversionFormatInfo.FormatColor, m_mapping.ConversionFormatInfo.FormatSrgb, Srgb)
                        : PickSRGB(m_mapping.FormatColor, m_mapping.FormatSrgb, Srgb);
-    viewInfo.aspect    = imageFormatInfo(viewInfo.format)->aspectMask;
+    viewInfo.aspect    = lookupFormatInfo(viewInfo.format)->aspectMask;
     viewInfo.swizzle   = m_mapping.Swizzle;
     viewInfo.usage     = UsageFlags;
     viewInfo.type      = GetImageViewTypeFromResourceType(m_type, Layer);
@@ -606,5 +628,30 @@ namespace dxvk {
       m_sampleView.Srgb = CreateView(AllLayers, Lod, VK_IMAGE_USAGE_SAMPLED_BIT, true);
   }
 
+  void D3D9CommonTexture::AllocData() {
+    // D3D9Initializer will handle clearing the data
+    const uint32_t count = CountSubresources();
+    for (uint32_t i = 0; i < count; i++) {
+      m_data[i] = m_device->GetAllocator()->Alloc(GetMipSize(i));
+    }
+  }
+
+  const Rc<DxvkBuffer>&  D3D9CommonTexture::GetBuffer(UINT Subresource, bool Initialize) {
+    if (unlikely(m_buffers[Subresource] == nullptr)) {
+      CreateBufferSubresource(Subresource);
+
+      if (Initialize) {
+        if (m_data[Subresource]) {
+          m_data[Subresource].Map();
+          memcpy(m_mappedSlices[Subresource].mapPtr, m_data[Subresource].Ptr(), GetMipSize(Subresource));
+        } else {
+          memset(m_mappedSlices[Subresource].mapPtr, 0, GetMipSize(Subresource));
+        }
+      }
+      m_data[Subresource] = {};
+    }
+
+    return m_buffers[Subresource];
+  }
 
 }

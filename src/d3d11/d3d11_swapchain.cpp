@@ -21,7 +21,7 @@ namespace dxvk {
     m_window    (hWnd),
     m_desc      (*pDesc),
     m_device    (pDevice->GetDXVKDevice()),
-    m_context   (m_device->createContext()),
+    m_context   (m_device->createContext(DxvkContextType::Supplementary)),
     m_frameLatencyCap(pDevice->GetOptions()->maxFrameLatency) {
     CreateFrameLatencyEvent();
 
@@ -35,6 +35,11 @@ namespace dxvk {
 
 
   D3D11SwapChain::~D3D11SwapChain() {
+    // Avoids hanging when in this state, see comment
+    // in DxvkDevice::~DxvkDevice.
+    if (this_thread::isInModuleDetachment())
+      return;
+
     m_device->waitForSubmission(&m_presentStatus);
     m_device->waitForIdle();
     
@@ -259,6 +264,7 @@ namespace dxvk {
 
     // Flush pending rendering commands before
     auto immediateContext = static_cast<D3D11ImmediateContext*>(deviceContext.ptr());
+    immediateContext->EndFrame();
     immediateContext->Flush();
 
     // Bump our frame id.

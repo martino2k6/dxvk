@@ -69,16 +69,14 @@ namespace dxvk {
   void SpirvModule::addEntryPoint(
           uint32_t                entryPointId,
           spv::ExecutionModel     executionModel,
-    const char*                   name,
-          uint32_t                interfaceCount,
-    const uint32_t*               interfaceIds) {
-    m_entryPoints.putIns  (spv::OpEntryPoint, 3 + m_entryPoints.strLen(name) + interfaceCount);
+    const char*                   name) {
+    m_entryPoints.putIns  (spv::OpEntryPoint, 3 + m_entryPoints.strLen(name) + m_interfaceVars.size());
     m_entryPoints.putWord (executionModel);
     m_entryPoints.putWord (entryPointId);
     m_entryPoints.putStr  (name);
     
-    for (uint32_t i = 0; i < interfaceCount; i++)
-      m_entryPoints.putWord(interfaceIds[i]);
+    for (uint32_t varId : m_interfaceVars)
+      m_entryPoints.putWord(varId);
   }
   
   
@@ -884,9 +882,12 @@ namespace dxvk {
           spv::StorageClass       storageClass) {
     uint32_t resultId = this->allocateId();
     
+    if (isInterfaceVar(storageClass))
+      m_interfaceVars.push_back(resultId);
+
     auto& code = storageClass != spv::StorageClassFunction
       ? m_variables : m_code;
-    
+
     code.putIns  (spv::OpVariable, 4);
     code.putWord (pointerType);
     code.putWord (resultId);
@@ -901,6 +902,9 @@ namespace dxvk {
           uint32_t                initialValue) {
     uint32_t resultId = this->allocateId();
     
+    if (isInterfaceVar(storageClass))
+      m_interfaceVars.push_back(resultId);
+
     auto& code = storageClass != spv::StorageClassFunction
       ? m_variables : m_code;
     
@@ -2982,6 +2986,8 @@ namespace dxvk {
   void SpirvModule::opLabel(uint32_t labelId) {
     m_code.putIns (spv::OpLabel, 2);
     m_code.putWord(labelId);
+
+    m_blockId = labelId;
   }
   
   
@@ -3529,6 +3535,8 @@ namespace dxvk {
           uint32_t                label) {
     m_code.putIns (spv::OpBranch, 2);
     m_code.putWord(label);
+
+    m_blockId = 0;
   }
   
   
@@ -3540,6 +3548,8 @@ namespace dxvk {
     m_code.putWord(condition);
     m_code.putWord(trueLabel);
     m_code.putWord(falseLabel);
+
+    m_blockId = 0;
   }
   
   
@@ -3556,6 +3566,8 @@ namespace dxvk {
       m_code.putWord(caseLabels[i].literal);
       m_code.putWord(caseLabels[i].labelId);
     }
+
+    m_blockId = 0;
   }
   
   
@@ -3580,16 +3592,18 @@ namespace dxvk {
     
   void SpirvModule::opReturn() {
     m_code.putIns (spv::OpReturn, 1);
+    m_blockId = 0;
   }
   
   
   void SpirvModule::opKill() {
     m_code.putIns (spv::OpKill, 1);
+    m_blockId = 0;
   }
   
   
   void SpirvModule::opDemoteToHelperInvocation() {
-    m_code.putIns (spv::OpDemoteToHelperInvocationEXT, 1);
+    m_code.putIns (spv::OpDemoteToHelperInvocation, 1);
   }
   
   
@@ -3738,4 +3752,16 @@ namespace dxvk {
     }
   }
   
+
+  bool SpirvModule::isInterfaceVar(
+          spv::StorageClass       sclass) const {
+    if (m_version < spvVersion(1, 4)) {
+      return sclass == spv::StorageClassInput
+          || sclass == spv::StorageClassOutput;
+    } else {
+      // All global variables need to be declared
+      return sclass != spv::StorageClassFunction;
+    }
+  }
+
 }

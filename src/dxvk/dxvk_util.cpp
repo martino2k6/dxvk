@@ -5,25 +5,6 @@
 
 namespace dxvk::util {
   
-  VkPipelineStageFlags pipelineStages(
-          VkShaderStageFlags shaderStages) {
-    VkPipelineStageFlags result = 0;
-    if (shaderStages & VK_SHADER_STAGE_COMPUTE_BIT)
-      result |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    if (shaderStages & VK_SHADER_STAGE_VERTEX_BIT)
-      result |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
-    if (shaderStages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
-      result |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT;
-    if (shaderStages & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
-      result |= VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
-    if (shaderStages & VK_SHADER_STAGE_GEOMETRY_BIT)
-      result |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
-    if (shaderStages & VK_SHADER_STAGE_FRAGMENT_BIT)
-      result |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    return result;
-  }
-  
-  
   uint32_t computeMipLevelCount(VkExtent3D imageSize) {
     uint32_t maxDim = std::max(imageSize.width, imageSize.height);
              maxDim = std::max(imageSize.depth, maxDim);
@@ -163,7 +144,7 @@ namespace dxvk::util {
 
 
   VkDeviceSize computeImageDataSize(VkFormat format, VkExtent3D extent) {
-    const DxvkFormatInfo* formatInfo = imageFormatInfo(format);
+    const DxvkFormatInfo* formatInfo = lookupFormatInfo(format);
 
     VkDeviceSize size = 0;
 
@@ -288,6 +269,48 @@ namespace dxvk::util {
     result.b = resolveComponentSwizzle(VK_COMPONENT_SWIZZLE_B, dstMapping, srcMapping);
     result.a = resolveComponentSwizzle(VK_COMPONENT_SWIZZLE_A, dstMapping, srcMapping);
     return result;
+  }
+
+
+  VkBlendFactor remapAlphaToColorBlendFactor(VkBlendFactor factor) {
+    switch (factor) {
+      // Make sure we use the red component from the
+      // fragment shader since alpha may be undefined
+      case VK_BLEND_FACTOR_SRC_ALPHA:
+        return VK_BLEND_FACTOR_SRC_COLOR;
+
+      case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA:
+        return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+
+      case VK_BLEND_FACTOR_SRC1_ALPHA:
+        return VK_BLEND_FACTOR_SRC1_COLOR;
+
+      case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA:
+        return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+
+      // This is defined to always be 1 for alpha
+      case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:
+        return VK_BLEND_FACTOR_ONE;
+
+      // Make sure we use the red component from the
+      // attachment since there is no alpha component
+      case VK_BLEND_FACTOR_DST_ALPHA:
+        return VK_BLEND_FACTOR_DST_COLOR;
+
+      case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
+        return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+
+      // For blend constants we actually need to do the
+      // opposite and make sure we always use alpha
+      case VK_BLEND_FACTOR_CONSTANT_COLOR:
+        return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+
+      case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR:
+        return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+
+      default:
+        return factor;
+    }
   }
 
 

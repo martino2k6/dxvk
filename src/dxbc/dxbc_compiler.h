@@ -184,7 +184,7 @@ namespace dxvk {
     uint32_t builtinLaneId        = 0;
     uint32_t killState            = 0;
 
-    uint32_t specRsSampleCount    = 0;
+    uint32_t pushConstantId       = 0;
   };
   
   
@@ -348,24 +348,11 @@ namespace dxvk {
     DxbcResourceType type;
     uint32_t typeId;
     uint32_t varId;
-    uint32_t specId;
     uint32_t stride;
     uint32_t align;
   };
   
 
-  /**
-   * \brief SPIR-V extension set
-   * 
-   * Keeps track of which optional SPIR-V extensions
-   * are enabled so that any required setup code is
-   * only run once. 
-   */
-  struct DxbcSpirvExtensions {
-    bool shaderViewportIndexLayer = false;
-  };
-
-  
   /**
    * \brief DXBC to SPIR-V shader compiler
    * 
@@ -424,7 +411,7 @@ namespace dxvk {
     ///////////////////////////////////////////////////////
     // Resource slot description for the shader. This will
     // be used to map D3D11 bindings to DXVK bindings.
-    std::vector<DxvkResourceSlot> m_resourceSlots;
+    std::vector<DxvkBindingInfo> m_bindings;
     
     ////////////////////////////////////////////////
     // Temporary r# vector registers with immediate
@@ -518,7 +505,6 @@ namespace dxvk {
     ///////////////////////////////////////////////////
     // Entry point description - we'll need to declare
     // the function ID and all input/output variables.
-    std::vector<uint32_t> m_entryPointInterfaces;
     uint32_t              m_entryPointId = 0;
     
     ////////////////////////////////////////////
@@ -535,10 +521,6 @@ namespace dxvk {
     DxbcCompilerGsPart m_gs;
     DxbcCompilerPsPart m_ps;
     DxbcCompilerCsPart m_cs;
-
-    /////////////////////////////
-    // Enabled SPIR-V extensions
-    DxbcSpirvExtensions m_extensions;
 
     //////////////////////
     // Global state stuff
@@ -584,8 +566,7 @@ namespace dxvk {
     void emitDclConstantBufferVar(
             uint32_t                regIdx,
             uint32_t                numConstants,
-      const char*                   name,
-            bool                    asSsbo);
+      const char*                   name);
     
     void emitDclSampler(
       const DxbcShaderInstruction&  ins);
@@ -1018,21 +999,12 @@ namespace dxvk {
       const DxbcRegister&           reg,
             DxbcRegisterValue       value);
     
-    ////////////////////////////////////////
-    // Spec constant declaration and access
-    uint32_t emitNewSpecConstant(
-            DxvkSpecConstantId      specId,
-            DxbcScalarType          type,
-            uint32_t                value,
-      const char*                   name);
-
     ////////////////////////////
     // Input/output preparation
     void emitInputSetup();
     void emitInputSetup(uint32_t vertexCount);
     
     void emitOutputSetup();
-    void emitOutputMapping();
     void emitOutputDepthClamp();
     
     void emitInitWorkgroupMemory();
@@ -1091,8 +1063,9 @@ namespace dxvk {
     
     ///////////////////////////////
     // Some state checking methods
-    uint32_t emitUavWriteTest(
-      const DxbcBufferInfo&         uav);
+    DxbcConditional emitBeginPsKillTest();
+
+    void emitEndPsKillTest(const DxbcConditional& cond);
     
     //////////////////////////////////////
     // Common function definition methods
@@ -1199,10 +1172,8 @@ namespace dxvk {
     uint32_t emitBuiltinTessLevelInner(
             spv::StorageClass storageClass);
 
-    ////////////////////////////////
-    // Extension enablement methods
-    void enableShaderViewportIndexLayer();
-    
+    uint32_t emitPushConstants();
+
     ////////////////
     // Misc methods
     DxbcCfgBlock* cfgFindBlock(

@@ -37,16 +37,8 @@ namespace dxvk {
     /// shader invocations if derivatives remain valid.
     bool useSubgroupOpsForEarlyDiscard = false;
 
-    /// Use SDiv instead of SHR to converte byte offsets to
-    /// dword offsets. Fixes RE2 and DMC5 on Nvidia drivers.
-    bool useSdivForBufferIndex = false;
-
     /// Enables NaN fixup for render target outputs
     bool enableRtOutputNanFixup = false;
-
-    /// Implement dynamically indexed uniform buffers
-    /// with storage buffers for tight bounds checking
-    bool dynamicIndexedConstantBufferAsSsbo = false;
 
     /// Clear thread-group shared memory to zero
     bool zeroInitWorkgroupMemory = false;

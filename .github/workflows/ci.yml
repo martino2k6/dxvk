@@ -28,7 +28,7 @@ jobs:
       - name: Create Version Name
         id: version_name
         run: |
-          export VERSION_NAME="${{ steps.branch_name.outputs.current_branch }}-$(git describe)"
+          export VERSION_NAME="${{ steps.branch_name.outputs.current_branch }}-$(git describe --long)"
           echo "::set-output name=name::${VERSION_NAME}"
 
       - name: Setup Problem Matcher

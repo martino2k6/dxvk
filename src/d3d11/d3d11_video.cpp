@@ -1,6 +1,5 @@
 #include <algorithm>
 
-#include "d3d11_context.h"
 #include "d3d11_context_imm.h"
 #include "d3d11_video.h"
 
@@ -159,7 +158,7 @@ namespace dxvk {
     DXGI_VK_FORMAT_INFO formatInfo = pDevice->LookupFormat(resourceDesc.Format, DXGI_VK_FORMAT_MODE_COLOR);
     DXGI_VK_FORMAT_FAMILY formatFamily = pDevice->LookupFamily(resourceDesc.Format, DXGI_VK_FORMAT_MODE_COLOR);
 
-    VkImageAspectFlags aspectMask = imageFormatInfo(formatInfo.Format)->aspectMask;
+    VkImageAspectFlags aspectMask = lookupFormatInfo(formatInfo.Format)->aspectMask;
 
     DxvkImageViewCreateInfo viewInfo;
     viewInfo.format  = formatInfo.Format;
@@ -257,7 +256,7 @@ namespace dxvk {
 
     DxvkImageViewCreateInfo viewInfo;
     viewInfo.format  = formatInfo.Format;
-    viewInfo.aspect  = imageFormatInfo(viewInfo.format)->aspectMask;
+    viewInfo.aspect  = lookupFormatInfo(viewInfo.format)->aspectMask;
     viewInfo.swizzle = formatInfo.Swizzle;
     viewInfo.usage   = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
@@ -329,11 +328,11 @@ namespace dxvk {
     SpirvCodeBuffer vsCode(d3d11_video_blit_vert);
     SpirvCodeBuffer fsCode(d3d11_video_blit_frag);
 
-    const std::array<DxvkResourceSlot, 4> fsResourceSlots = {{
-      { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC               },
-      { 1, VK_DESCRIPTOR_TYPE_SAMPLER                              },
-      { 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_IMAGE_VIEW_TYPE_2D },
-      { 3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_IMAGE_VIEW_TYPE_2D },
+    const std::array<DxvkBindingInfo, 4> fsBindings = {{
+      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_IMAGE_VIEW_TYPE_MAX_ENUM, 0, VK_ACCESS_UNIFORM_READ_BIT },
+      { VK_DESCRIPTOR_TYPE_SAMPLER,        1, VK_IMAGE_VIEW_TYPE_MAX_ENUM, 0, 0 },
+      { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  2, VK_IMAGE_VIEW_TYPE_2D,       0, VK_ACCESS_SHADER_READ_BIT },
+      { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  3, VK_IMAGE_VIEW_TYPE_2D,       0, VK_ACCESS_SHADER_READ_BIT },
     }};
 
     DxvkShaderCreateInfo vsInfo;
@@ -343,8 +342,8 @@ namespace dxvk {
 
     DxvkShaderCreateInfo fsInfo;
     fsInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fsInfo.resourceSlotCount = fsResourceSlots.size();
-    fsInfo.resourceSlots = fsResourceSlots.data();
+    fsInfo.bindingCount = fsBindings.size();
+    fsInfo.bindings = fsBindings.data();
     fsInfo.inputMask = 0x1;
     fsInfo.outputMask = 0x1;
     m_fs = new DxvkShader(fsInfo, std::move(fsCode));
@@ -365,6 +364,7 @@ namespace dxvk {
     samplerInfo.compareOp       = VK_COMPARE_OP_ALWAYS;
     samplerInfo.borderColor     = VkClearColorValue();
     samplerInfo.usePixelCoord   = VK_FALSE;
+    samplerInfo.nonSeamless     = VK_FALSE;
     m_sampler = Device->createSampler(samplerInfo);
 
     DxvkBufferCreateInfo bufferInfo;
@@ -1047,7 +1047,7 @@ namespace dxvk {
         continue;
 
       if (!hasStreamsEnabled) {
-        m_ctx->ResetState();
+        m_ctx->ResetCommandListState();
         BindOutputView(pOutputView);
         hasStreamsEnabled = true;
       }
@@ -1055,8 +1055,10 @@ namespace dxvk {
       BlitStream(streamState, &pStreams[i]);
     }
 
-    if (hasStreamsEnabled)
-      m_ctx->RestoreState();
+    if (hasStreamsEnabled) {
+      UnbindResources();
+      m_ctx->RestoreCommandListState();
+    }
 
     return S_OK;
   }
@@ -1196,10 +1198,10 @@ namespace dxvk {
       rt.color[0].view = cView;
       rt.color[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-      ctx->bindRenderTargets(rt);
-      ctx->bindShader(VK_SHADER_STAGE_VERTEX_BIT, m_vs);
-      ctx->bindShader(VK_SHADER_STAGE_FRAGMENT_BIT, m_fs);
-      ctx->bindResourceBuffer(0, DxvkBufferSlice(m_ubo));
+      ctx->bindRenderTargets(std::move(rt), 0u);
+      ctx->bindShader<VK_SHADER_STAGE_VERTEX_BIT>(Rc<DxvkShader>(m_vs));
+      ctx->bindShader<VK_SHADER_STAGE_FRAGMENT_BIT>(Rc<DxvkShader>(m_fs));
+      ctx->bindResourceBuffer(VK_SHADER_STAGE_FRAGMENT_BIT, 0, DxvkBufferSlice(m_ubo));
 
       DxvkInputAssemblyState iaState;
       iaState.primitiveTopology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -1278,6 +1280,7 @@ namespace dxvk {
       uboData.coordMatrix[1][1] = 1.0f;
       uboData.yMin = 0.0f;
       uboData.yMax = 1.0f;
+      uboData.isPlanar = cViews[1] != nullptr;
 
       if (cIsYCbCr)
         ApplyYCbCrMatrix(uboData.colorMatrix, cStreamState.colorSpace.YCbCr_Matrix);
@@ -1292,12 +1295,29 @@ namespace dxvk {
 
       ctx->invalidateBuffer(m_ubo, uboSlice);
       ctx->setViewports(1, &viewport, &scissor);
-      ctx->bindResourceSampler(1, m_sampler);
+      ctx->bindResourceSampler(VK_SHADER_STAGE_FRAGMENT_BIT, 1, Rc<DxvkSampler>(m_sampler));
 
       for (uint32_t i = 0; i < cViews.size(); i++)
-        ctx->bindResourceView(2 + i, cViews[i], nullptr);
+        ctx->bindResourceImageView(VK_SHADER_STAGE_FRAGMENT_BIT, 2 + i, Rc<DxvkImageView>(cViews[i]));
 
       ctx->draw(3, 1, 0, 0);
+
+      ctx->bindResourceSampler(VK_SHADER_STAGE_FRAGMENT_BIT, 1, nullptr);
+
+      for (uint32_t i = 0; i < cViews.size(); i++)
+        ctx->bindResourceImageView(VK_SHADER_STAGE_FRAGMENT_BIT, 2 + i, nullptr);
+    });
+  }
+
+
+  void D3D11VideoContext::UnbindResources() {
+    m_ctx->EmitCs([this] (DxvkContext* ctx) {
+      ctx->bindRenderTargets(DxvkRenderTargets(), 0u);
+
+      ctx->bindShader<VK_SHADER_STAGE_VERTEX_BIT>(nullptr);
+      ctx->bindShader<VK_SHADER_STAGE_FRAGMENT_BIT>(nullptr);
+
+      ctx->bindResourceBuffer(VK_SHADER_STAGE_FRAGMENT_BIT, 0, DxvkBufferSlice());
     });
   }
 

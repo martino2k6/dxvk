@@ -244,7 +244,7 @@ namespace dxvk {
     
     auto deviceProp = m_adapter->deviceProperties();
     auto memoryProp = m_adapter->memoryProperties();
-    auto deviceId   = m_adapter->devicePropertiesExt().coreDeviceId;
+    auto vk11       = m_adapter->devicePropertiesExt().vk11;
     
     // Custom Vendor / Device ID
     if (options->customVendorId >= 0)
@@ -252,11 +252,10 @@ namespace dxvk {
     
     if (options->customDeviceId >= 0)
       deviceProp.deviceID = options->customDeviceId;
-    
-    const char* description = deviceProp.deviceName;
-    // Custom device description
-    if (!options->customDeviceDesc.empty())
-      description = options->customDeviceDesc.c_str();
+
+    std::string description = options->customDeviceDesc.empty()
+      ? std::string(deviceProp.deviceName)
+      : options->customDeviceDesc;
     
     // XXX nvapi workaround for a lot of Unreal Engine 4 games
     if (options->customVendorId < 0 && options->customDeviceId < 0
@@ -268,7 +267,10 @@ namespace dxvk {
     
     // Convert device name
     std::memset(pDesc->Description, 0, sizeof(pDesc->Description));
-    str::tows(description, pDesc->Description);
+
+    str::transcodeString(pDesc->Description,
+      sizeof(pDesc->Description) / sizeof(pDesc->Description[0]) - 1,
+      description.c_str(), description.size());
     
     // Get amount of video memory
     // based on the Vulkan heaps
@@ -322,8 +324,8 @@ namespace dxvk {
     pDesc->GraphicsPreemptionGranularity  = DXGI_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
     pDesc->ComputePreemptionGranularity   = DXGI_COMPUTE_PREEMPTION_DMA_BUFFER_BOUNDARY;
 
-    if (deviceId.deviceLUIDValid)
-      std::memcpy(&pDesc->AdapterLuid, deviceId.deviceLUID, VK_LUID_SIZE);
+    if (vk11.deviceLUIDValid)
+      std::memcpy(&pDesc->AdapterLuid, vk11.deviceLUID, VK_LUID_SIZE);
     else
       pDesc->AdapterLuid = GetAdapterLUID(m_index);
 
