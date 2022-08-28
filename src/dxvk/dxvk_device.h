@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "dxvk_adapter.h"
 #include "dxvk_buffer.h"
 #include "dxvk_compute.h"
@@ -20,6 +22,7 @@
 #include "dxvk_renderpass.h"
 #include "dxvk_sampler.h"
 #include "dxvk_shader.h"
+#include "dxvk_sparse.h"
 #include "dxvk_stats.h"
 #include "dxvk_unbound.h"
 #include "dxvk_marker.h"
@@ -64,6 +67,7 @@ namespace dxvk {
   struct DxvkDeviceQueueSet {
     DxvkDeviceQueue graphics;
     DxvkDeviceQueue transfer;
+    DxvkDeviceQueue sparse;
   };
   
   /**
@@ -177,6 +181,33 @@ namespace dxvk {
     const DxvkDeviceInfo& properties() const {
       return m_properties;
     }
+
+    /**
+     * \brief Queries format feature support
+     *
+     * \param [in] format Format to query
+     * \returns Format feature bits
+     */
+    DxvkFormatFeatures getFormatFeatures(VkFormat format) const {
+      return m_adapter->getFormatFeatures(format);
+    }
+
+    /**
+     * \brief Queries format limits
+     *
+     * \param [in] format Image format to quers
+     * \param [in] type Image type
+     * \param [in] tiling Image tiling
+     * \param [in] usage Image usage flags
+     * \param [in] flags Image create flags
+     * \returns Format limits if the given image is supported
+     */
+    std::optional<DxvkFormatLimits> getFormatLimits(
+            VkFormat                  format,
+            VkImageType               type,
+            VkImageTiling             tiling,
+            VkImageUsageFlags         usage,
+            VkImageCreateFlags        flags) const;
 
     /**
      * \brief Get device status
@@ -351,6 +382,12 @@ namespace dxvk {
       const DxvkSamplerCreateInfo&  createInfo);
 
     /**
+     * \brief Creates a sparse page allocator
+     * \returns Sparse page allocator
+     */
+    Rc<DxvkSparsePageAllocator> createSparsePageAllocator();
+
+    /**
      * \brief Retrieves stat counters
      * 
      * Can be used by the HUD to display some
@@ -406,13 +443,9 @@ namespace dxvk {
      * Submits the given command list to the device using
      * the given set of optional synchronization primitives.
      * \param [in] commandList The command list to submit
-     * \param [in] waitSync (Optional) Semaphore to wait on
-     * \param [in] wakeSync (Optional) Semaphore to notify
      */
     void submitCommandList(
-      const Rc<DxvkCommandList>&      commandList,
-            VkSemaphore               waitSync,
-            VkSemaphore               wakeSync);
+      const Rc<DxvkCommandList>&      commandList);
 
     /**
      * \brief Locks submission queue

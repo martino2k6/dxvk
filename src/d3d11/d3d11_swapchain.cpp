@@ -2,6 +2,8 @@
 #include "d3d11_device.h"
 #include "d3d11_swapchain.h"
 
+#include "../util/util_win32_compat.h"
+
 namespace dxvk {
 
   static uint16_t MapGammaControlPoint(float x) {
@@ -252,9 +254,6 @@ namespace dxvk {
       DXGI_RATIONAL rate = pDisplayMode->RefreshRate;
       m_displayRefreshRate = double(rate.Numerator) / double(rate.Denominator);
     }
-
-    if (m_presenter != nullptr)
-      m_presenter->setFrameRateLimiterRefreshRate(m_displayRefreshRate);
   }
 
 
@@ -333,8 +332,8 @@ namespace dxvk {
       cHud         = m_hud,
       cCommandList = m_context->endRecording()
     ] (DxvkContext* ctx) {
-      m_device->submitCommandList(cCommandList,
-        cSync.acquire, cSync.present);
+      cCommandList->setWsiSemaphores(cSync);
+      m_device->submitCommandList(cCommandList);
 
       if (cHud != nullptr && !cFrameId)
         cHud->update();
@@ -407,7 +406,6 @@ namespace dxvk {
       presenterDesc);
     
     m_presenter->setFrameRateLimit(m_parent->GetOptions()->maxFrameRate);
-    m_presenter->setFrameRateLimiterRefreshRate(m_displayRefreshRate);
 
     CreateRenderTargetViews();
   }
@@ -528,9 +526,7 @@ namespace dxvk {
       subresources, VK_IMAGE_LAYOUT_UNDEFINED);
 
     m_device->submitCommandList(
-      m_context->endRecording(),
-      VK_NULL_HANDLE,
-      VK_NULL_HANDLE);
+      m_context->endRecording());
   }
 
 

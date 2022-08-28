@@ -22,6 +22,7 @@ namespace dxvk {
     auto queueFamilies = m_adapter->findQueueFamilies();
     m_queues.graphics = getQueue(queueFamilies.graphics, 0);
     m_queues.transfer = getQueue(queueFamilies.transfer, 0);
+    m_queues.sparse = getQueue(queueFamilies.sparse, 0);
   }
   
   
@@ -40,6 +41,39 @@ namespace dxvk {
     // Stop workers explicitly in order to prevent
     // access to structures that are being destroyed.
     m_objects.pipelineManager().stopWorkerThreads();
+  }
+
+
+  std::optional<DxvkFormatLimits> DxvkDevice::getFormatLimits(
+          VkFormat                  format,
+          VkImageType               type,
+          VkImageTiling             tiling,
+          VkImageUsageFlags         usage,
+          VkImageCreateFlags        flags) const {
+    auto vk = m_adapter->vki();
+
+    VkPhysicalDeviceImageFormatInfo2 info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2 };
+    info.format = format;
+    info.type   = type;
+    info.tiling = tiling;
+    info.usage  = usage;
+    info.flags  = flags;
+
+    VkImageFormatProperties2 properties = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+
+    VkResult vr = vk->vkGetPhysicalDeviceImageFormatProperties2(
+      m_adapter->handle(), &info, &properties);
+
+    if (vr != VK_SUCCESS)
+      return std::nullopt;
+
+    DxvkFormatLimits result;
+    result.maxExtent        = properties.imageFormatProperties.maxExtent;
+    result.maxMipLevels     = properties.imageFormatProperties.maxMipLevels;
+    result.maxArrayLayers   = properties.imageFormatProperties.maxArrayLayers;
+    result.sampleCounts     = properties.imageFormatProperties.sampleCounts;
+    result.maxResourceSize  = properties.imageFormatProperties.maxResourceSize;
+    return result;
   }
 
 
@@ -182,6 +216,11 @@ namespace dxvk {
   }
   
   
+  Rc<DxvkSparsePageAllocator> DxvkDevice::createSparsePageAllocator() {
+    return new DxvkSparsePageAllocator(this, m_objects.memoryManager());
+  }
+
+
   DxvkStatCounters DxvkDevice::getStatCounters() {
     DxvkPipelineCount pipe = m_objects.pipelineManager().getPipelineCount();
     
@@ -234,18 +273,13 @@ namespace dxvk {
 
 
   void DxvkDevice::submitCommandList(
-    const Rc<DxvkCommandList>&      commandList,
-          VkSemaphore               waitSync,
-          VkSemaphore               wakeSync) {
-    DxvkSubmitInfo submitInfo;
-    submitInfo.cmdList  = commandList;
-    submitInfo.waitSync = waitSync;
-    submitInfo.wakeSync = wakeSync;
+    const Rc<DxvkCommandList>&      commandList) {
+    DxvkSubmitInfo submitInfo = { };
+    submitInfo.cmdList = commandList;
     m_submissionQueue.submit(submitInfo);
 
     std::lock_guard<sync::Spinlock> statLock(m_statLock);
     m_statCounters.merge(commandList->statCounters());
-    m_statCounters.addCtr(DxvkStatCounter::QueueSubmitCount, 1);
   }
   
   
@@ -309,7 +343,10 @@ namespace dxvk {
           uint32_t                family,
           uint32_t                index) const {
     VkQueue queue = VK_NULL_HANDLE;
-    m_vkd->vkGetDeviceQueue(m_vkd->device(), family, index, &queue);
+
+    if (family != VK_QUEUE_FAMILY_IGNORED)
+      m_vkd->vkGetDeviceQueue(m_vkd->device(), family, index, &queue);
+
     return DxvkDeviceQueue { queue, family, index };
   }
   

@@ -23,19 +23,14 @@ namespace dxvk {
     // clip device feature is not supported
     bool useDepthClipWorkaround = false;
 
-    /// Use the ShaderImageReadWithoutFormat capability.
-    bool useStorageImageReadWithoutFormat = false;
+    /// Determines whether format qualifiers
+    /// on typed UAV loads are required
+    bool supportsTypedUavLoadR32 = false;
+    bool supportsTypedUavLoadExtended = false;
 
     /// Use subgroup operations to reduce the number of
     /// atomic operations for append/consume buffers.
     bool useSubgroupOpsForAtomicCounters = false;
-
-    /// Use a SPIR-V extension to implement D3D-style discards
-    bool useDemoteToHelperInvocation = false;
-
-    /// Use subgroup operations to discard fragment
-    /// shader invocations if derivatives remain valid.
-    bool useSubgroupOpsForEarlyDiscard = false;
 
     /// Enables NaN fixup for render target outputs
     bool enableRtOutputNanFixup = false;

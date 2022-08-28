@@ -454,7 +454,9 @@ namespace dxvk {
     D3D11StateObjectSet<D3D11RasterizerState>   m_rsStateObjects;
     D3D11StateObjectSet<D3D11SamplerState>      m_samplerObjects;
     D3D11ShaderModuleSet                        m_shaderModules;
-    
+
+    D3D11_TILED_RESOURCES_TIER      m_tiledResourcesTier;
+
     HRESULT CreateShaderModule(
             D3D11CommonShader*      pShaderModule,
             DxvkShaderKey           ShaderKey,
@@ -464,13 +466,14 @@ namespace dxvk {
       const DxbcModuleInfo*         pModuleInfo);
     
     HRESULT GetFormatSupportFlags(
-            DXGI_FORMAT Format,
-            UINT*       pFlags1,
-            UINT*       pFlags2) const;
+            DXGI_FORMAT             Format,
+            UINT*                   pFlags1,
+            UINT*                   pFlags2) const;
     
     BOOL GetImageTypeSupport(
-            VkFormat    Format,
-            VkImageType Type) const;
+            VkFormat                Format,
+            VkImageType             Type,
+            VkImageCreateFlags      Flags) const;
 
     template<bool IsKmtHandle>
     HRESULT OpenSharedResourceGeneric(
@@ -491,6 +494,10 @@ namespace dxvk {
             UINT                        Subresource,
       const D3D11_BOX*                  pBox);
     
+    static D3D11_TILED_RESOURCES_TIER DetermineTiledResourcesTier(
+      const DxvkDeviceFeatures&         Features,
+      const DxvkDeviceInfo&             Properties);
+
     static D3D_FEATURE_LEVEL GetMaxFeatureLevel(
       const Rc<DxvkInstance>&           pInstance);
     

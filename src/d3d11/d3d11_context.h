@@ -699,9 +699,9 @@ namespace dxvk {
 
     HRESULT STDMETHODCALLTYPE CopyTileMappings(
             ID3D11Resource*                   pDestTiledResource,
-      const D3D11_TILED_RESOURCE_COORDINATE*  pDestRegionStartCoordinate,
+      const D3D11_TILED_RESOURCE_COORDINATE*  pDestRegionCoordinate,
             ID3D11Resource*                   pSourceTiledResource,
-      const D3D11_TILED_RESOURCE_COORDINATE*  pSourceRegionStartCoordinate,
+      const D3D11_TILED_RESOURCE_COORDINATE*  pSourceRegionCoordinate,
       const D3D11_TILE_REGION_SIZE*           pTileRegionSize,
             UINT                              Flags);
 
@@ -715,13 +715,13 @@ namespace dxvk {
 
     HRESULT STDMETHODCALLTYPE UpdateTileMappings(
             ID3D11Resource*                   pTiledResource,
-            UINT                              NumTiledResourceRegions,
-      const D3D11_TILED_RESOURCE_COORDINATE*  pTiledResourceRegionStartCoordinates,
-      const D3D11_TILE_REGION_SIZE*           pTiledResourceRegionSizes,
+            UINT                              NumRegions,
+      const D3D11_TILED_RESOURCE_COORDINATE*  pRegionCoordinates,
+      const D3D11_TILE_REGION_SIZE*           pRegionSizes,
             ID3D11Buffer*                     pTilePool,
             UINT                              NumRanges,
       const UINT*                             pRangeFlags,
-      const UINT*                             pTilePoolStartOffsets,
+      const UINT*                             pRangeTileOffsets,
       const UINT*                             pRangeTileCounts,
             UINT                              Flags);
 
@@ -756,15 +756,10 @@ namespace dxvk {
             VkImageLayout             OldLayout,
             VkImageLayout             NewLayout);
 
-    D3D10DeviceLock LockContext() {
-      return m_multithread.AcquireLock();
-    }
-
   protected:
 
     D3D11DeviceContextExt<ContextType>        m_contextExt;
     D3D11UserDefinedAnnotation<ContextType>   m_annotation;
-    D3D10Multithread                          m_multithread;
 
     Rc<DxvkDevice>              m_device;
 
@@ -890,6 +885,13 @@ namespace dxvk {
             VkOffset3D                        SrcOffset,
             VkExtent3D                        SrcExtent);
 
+    void CopyTiledResourceData(
+            ID3D11Resource*                   pResource,
+      const D3D11_TILED_RESOURCE_COORDINATE*  pRegionCoordinate,
+      const D3D11_TILE_REGION_SIZE*           pRegionSize,
+            DxvkBufferSlice                   BufferSlice,
+            UINT                              Flags);
+
     void DiscardBuffer(
             ID3D11Resource*                   pResource);
 
@@ -916,6 +918,9 @@ namespace dxvk {
             UINT                              StartSlot,
             UINT                              NumSamplers,
             ID3D11SamplerState**              ppSamplers);
+
+    DxvkGlobalPipelineBarrier GetTiledResourceDependency(
+            ID3D11DeviceChild*                pObject);
 
     D3D11MaxUsedBindings GetMaxUsedBindings();
 
@@ -1122,6 +1127,10 @@ namespace dxvk {
 
     ContextType* GetTypedContext() {
       return static_cast<ContextType*>(this);
+    }
+
+    D3D10DeviceLock LockContext() {
+      return GetTypedContext()->LockContext();
     }
 
   };

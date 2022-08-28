@@ -669,7 +669,39 @@ namespace dxvk {
             VkOffset2D            srcOffset,
             VkExtent2D            srcExtent,
             VkFormat              format);
-    
+
+    /**
+     * \brief Copies pages from a sparse resource to a buffer
+     *
+     * \param [in] dstBuffer Buffer to write to
+     * \param [in] dstOffset Buffer offset
+     * \param [in] srcResource Source resource
+     * \param [in] pageCount Number of pages to copy
+     * \param [in] pages Page indices to copy
+     */
+    void copySparsePagesToBuffer(
+      const Rc<DxvkBuffer>&       dstBuffer,
+            VkDeviceSize          dstOffset,
+      const Rc<DxvkPagedResource>& srcResource,
+            uint32_t              pageCount,
+      const uint32_t*             pages);
+
+    /**
+     * \brief Copies pages from a buffer to a sparse resource
+     *
+     * \param [in] dstResource Resource to write to
+     * \param [in] pageCount Number of pages to copy
+     * \param [in] pages Page indices to copy
+     * \param [in] srcBuffer Source buffer
+     * \param [in] srcOffset Buffer offset
+     */
+    void copySparsePagesFromBuffer(
+      const Rc<DxvkPagedResource>& dstResource,
+            uint32_t              pageCount,
+      const uint32_t*             pages,
+      const Rc<DxvkBuffer>&       srcBuffer,
+            VkDeviceSize          srcOffset);
+
     /**
      * \brief Discards a buffer
      * 
@@ -826,8 +858,16 @@ namespace dxvk {
      * render target, or when subsequent draw calls access any
      * given resource for writing. It is assumed that no hazards
      * can happen between storage descriptors and other resources.
+     * \param [in] srcStages Source pipeline stages
+     * \param [in] srcAccess Source access
+     * \param [in] dstStages Destination pipeline stages
+     * \param [in] dstAccess Destination access
      */
-    void emitGraphicsBarrier();
+    void emitGraphicsBarrier(
+          VkPipelineStageFlags      srcStages,
+          VkAccessFlags             srcAccess,
+          VkPipelineStageFlags      dstStages,
+          VkAccessFlags             dstAccess);
 
     /**
      * \brief Generates mip maps
@@ -865,7 +905,17 @@ namespace dxvk {
       const Rc<DxvkImage>&            image,
       const VkImageSubresourceRange&  subresources,
             VkImageLayout             initialLayout);
-    
+
+    /**
+     * \brief Initializes sparse image
+     *
+     * Binds any metadata aspects that the image might
+     * have, and performs the initial layout transition.
+     * \param [in] image Image to initialize
+     */
+    void initSparseImage(
+      const Rc<DxvkImage>&            image);
+
     /**
      * \brief Invalidates a buffer's contents
      * 
@@ -1162,7 +1212,18 @@ namespace dxvk {
      */
     void setBarrierControl(
             DxvkBarrierControlFlags control);
-    
+
+    /**
+     * \brief Updates page table for a given sparse resource
+     *
+     * Note that this is a very high overhead operation.
+     * \param [in] bindInfo Sparse bind info
+     * \param [in] flags Sparse bind flags
+     */
+    void updatePageTable(
+      const DxvkSparseBindInfo&   bindInfo,
+            DxvkSparseBindFlags   flags);
+
     /**
      * \brief Launches a Cuda kernel
      *
@@ -1403,6 +1464,30 @@ namespace dxvk {
       const Rc<DxvkImage>&        srcImage,
             VkImageSubresourceLayers srcSubresource);
 
+    template<bool ToBuffer>
+    void copySparsePages(
+      const Rc<DxvkPagedResource>& sparse,
+            uint32_t              pageCount,
+      const uint32_t*             pages,
+      const Rc<DxvkBuffer>&       buffer,
+            VkDeviceSize          offset);
+
+    template<bool ToBuffer>
+    void copySparseBufferPages(
+      const Rc<DxvkBuffer>&       sparse,
+            uint32_t              pageCount,
+      const uint32_t*             pages,
+      const Rc<DxvkBuffer>&       buffer,
+            VkDeviceSize          offset);
+
+    template<bool ToBuffer>
+    void copySparseImagePages(
+      const Rc<DxvkImage>&        sparse,
+            uint32_t              pageCount,
+      const uint32_t*             pages,
+      const Rc<DxvkBuffer>&       buffer,
+            VkDeviceSize          offset);
+
     void resolveImageHw(
       const Rc<DxvkImage>&            dstImage,
       const Rc<DxvkImage>&            srcImage,
@@ -1587,6 +1672,12 @@ namespace dxvk {
 
     void resizeDescriptorArrays(
             uint32_t                  bindingCount);
+
+    void beginCurrentCommands();
+
+    void endCurrentCommands();
+
+    void splitCommands();
 
   };
   

@@ -82,15 +82,12 @@ namespace dxvk {
           VkDescriptorSet*          sets) {
     auto setMap = getSetMapCached(layout);
 
-    while (setMask) {
-      uint32_t setIndex = bit::tzcnt(setMask);
-
+    for (auto setIndex : bit::BitMask(setMask)) {
       sets[setIndex] = allocSet(
         setMap->sets[setIndex],
         layout->getSetLayout(setIndex));
 
       m_setsUsed += 1;
-      setMask &= setMask - 1;
     }
   }
 
@@ -164,14 +161,13 @@ namespace dxvk {
 
   DxvkDescriptorSetMap* DxvkDescriptorPool::getSetMap(
     const DxvkBindingLayoutObjects*           layout) {
-    auto pair = m_setMaps.find(layout->getPipelineLayout(false));
-    if (likely(pair != m_setMaps.end())) {
+    auto pair = m_setMaps.find(layout);
+    if (likely(pair != m_setMaps.end()))
       return &pair->second;
-    }
 
     auto iter = m_setMaps.emplace(
       std::piecewise_construct,
-      std::tuple(layout->getPipelineLayout(false)),
+      std::tuple(layout),
       std::tuple());
 
     for (uint32_t i = 0; i < DxvkDescriptorSets::SetCount; i++) {

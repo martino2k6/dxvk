@@ -24,6 +24,8 @@
 #include "d3d11_texture.h"
 #include "d3d11_video.h"
 
+#include "../wsi/wsi_window.h"
+
 #include "../util/util_shared_res.h"
 
 namespace dxvk {
@@ -41,9 +43,10 @@ namespace dxvk {
     m_featureFlags  (FeatureFlags),
     m_dxvkDevice    (pContainer->GetDXVKDevice()),
     m_dxvkAdapter   (m_dxvkDevice->adapter()),
-    m_d3d11Formats  (m_dxvkAdapter),
+    m_d3d11Formats  (m_dxvkDevice),
     m_d3d11Options  (m_dxvkDevice->instance()->config(), m_dxvkDevice),
-    m_dxbcOptions   (m_dxvkDevice, m_d3d11Options) {
+    m_dxbcOptions   (m_dxvkDevice, m_d3d11Options),
+    m_tiledResourcesTier(DetermineTiledResourcesTier(m_dxvkDevice->features(), m_dxvkDevice->properties())) {
     m_initializer = new D3D11Initializer(this);
     m_context     = new D3D11ImmediateContext(this, m_dxvkDevice);
     m_d3d10Device = new D3D10Device(this, m_context.ptr());
@@ -82,7 +85,7 @@ namespace dxvk {
       return E_INVALIDARG;
     
     D3D11_BUFFER_DESC desc = *pDesc;
-    HRESULT hr = D3D11Buffer::NormalizeBufferProperties(&desc);
+    HRESULT hr = D3D11Buffer::NormalizeBufferProperties(&desc, m_tiledResourcesTier);
 
     if (FAILED(hr))
       return hr;
@@ -92,7 +95,10 @@ namespace dxvk {
     
     try {
       const Com<D3D11Buffer> buffer = new D3D11Buffer(this, &desc);
-      m_initializer->InitBuffer(buffer.ptr(), pInitialData);
+
+      if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_TILE_POOL))
+        m_initializer->InitBuffer(buffer.ptr(), pInitialData);
+
       *ppBuffer = buffer.ref();
       return S_OK;
     } catch (const DxvkError& e) {
@@ -125,7 +131,8 @@ namespace dxvk {
     desc.MiscFlags      = pDesc->MiscFlags;
     desc.TextureLayout  = D3D11_TEXTURE_LAYOUT_UNDEFINED;
     
-    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc);
+    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc,
+      D3D11_TILED_RESOURCES_NOT_SUPPORTED);
 
     if (FAILED(hr))
       return hr;
@@ -201,7 +208,7 @@ namespace dxvk {
     desc.MiscFlags      = pDesc->MiscFlags;
     desc.TextureLayout  = pDesc->TextureLayout;
     
-    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc);
+    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc, m_tiledResourcesTier);
 
     if (FAILED(hr))
       return hr;
@@ -276,11 +283,15 @@ namespace dxvk {
     desc.MiscFlags      = pDesc->MiscFlags;
     desc.TextureLayout  = pDesc->TextureLayout;
     
-    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc);
+    HRESULT hr = D3D11CommonTexture::NormalizeTextureProperties(&desc, m_tiledResourcesTier);
 
     if (FAILED(hr))
       return hr;
-    
+
+    if ((desc.MiscFlags & D3D11_RESOURCE_MISC_TILED)
+     && (m_tiledResourcesTier < D3D11_TILED_RESOURCES_TIER_3))
+      return E_INVALIDARG;
+
     if (!ppTexture3D)
       return S_FALSE;
       
@@ -1148,8 +1159,11 @@ namespace dxvk {
     
     if (FAILED(D3D11SamplerState::NormalizeDesc(&desc)))
       return E_INVALIDARG;
-    
-    if (ppSamplerState == nullptr)
+
+    if (IsMinMaxFilter(desc.Filter) && m_tiledResourcesTier < D3D11_TILED_RESOURCES_TIER_2)
+      return E_INVALIDARG;
+
+    if (!ppSamplerState)
       return S_FALSE;
     
     try {
@@ -1475,17 +1489,23 @@ namespace dxvk {
     
     if (FAILED(DecodeSampleCount(SampleCount, &sampleCountFlag)))
       return SampleCount && SampleCount <= 32 ? S_OK : E_FAIL;
-    
+
+    // Get image create flags depending on function arguments
+    VkImageCreateFlags flags = 0;
+
+    if (Flags & D3D11_CHECK_MULTISAMPLE_QUALITY_LEVELS_TILED_RESOURCE) {
+      flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT
+            |  VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT
+            |  VK_IMAGE_CREATE_SPARSE_ALIASED_BIT;
+    }
+
     // Check if the device supports the given combination of format
     // and sample count. D3D exposes the opaque concept of quality
     // levels to the application, we'll just define one such level.
-    VkImageFormatProperties formatProps;
+    auto properties = m_dxvkDevice->getFormatLimits(format,
+      VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, flags);
     
-    VkResult status = m_dxvkAdapter->imageFormatProperties(
-      format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-      VK_IMAGE_USAGE_SAMPLED_BIT, 0, formatProps);
-    
-    if ((status == VK_SUCCESS) && (formatProps.sampleCounts & sampleCountFlag))
+    if (properties && (properties->sampleCounts & sampleCountFlag))
       *pNumQualityLevels = 1;
     return S_OK;
   }
@@ -1591,7 +1611,7 @@ namespace dxvk {
         info->MultisampleRTVWithForcedSampleCountOne  = TRUE; /* not really */
         info->SAD4ShaderInstructions                  = TRUE;
         info->ExtendedDoublesShaderInstructions       = TRUE;
-        info->ExtendedResourceSharing                 = TRUE; /* not really */
+        info->ExtendedResourceSharing                 = TRUE;
       } return S_OK;
 
       case D3D11_FEATURE_ARCHITECTURE_INFO: {
@@ -1640,8 +1660,8 @@ namespace dxvk {
 
         // Min/Max filtering requires Tiled Resources Tier 2 for some reason,
         // so we cannot support it even though Vulkan exposes this feature
-        info->TiledResourcesTier                    = D3D11_TILED_RESOURCES_NOT_SUPPORTED;
-        info->MinMaxFiltering                       = FALSE;
+        info->TiledResourcesTier                    = m_tiledResourcesTier;
+        info->MinMaxFiltering                       = m_tiledResourcesTier >= D3D11_TILED_RESOURCES_TIER_2;
         info->ClearViewAlsoSupportsDepthOnlyFormats = TRUE;
         info->MapOnDefaultBuffers                   = TRUE;
       } return S_OK;
@@ -1661,7 +1681,7 @@ namespace dxvk {
         if (FeatureSupportDataSize != sizeof(*info))
           return E_INVALIDARG;
 
-        info->Profile = FALSE;
+        info->Profile = m_context->IsAnnotationEnabled();
       } return S_OK;
 
       case D3D11_FEATURE_D3D9_OPTIONS1: {
@@ -1683,14 +1703,13 @@ namespace dxvk {
           return E_INVALIDARG;
 
         const auto& extensions = m_dxvkDevice->extensions();
-        const auto& features = m_dxvkDevice->features();
 
         info->PSSpecifiedStencilRefSupported = extensions.extShaderStencilExport;
-        info->TypedUAVLoadAdditionalFormats  = features.core.features.shaderStorageImageReadWithoutFormat;
+        info->TypedUAVLoadAdditionalFormats  = m_dxbcOptions.supportsTypedUavLoadExtended;
         info->ROVsSupported                  = FALSE;
         info->ConservativeRasterizationTier  = D3D11_CONSERVATIVE_RASTERIZATION_NOT_SUPPORTED;
         info->MapOnDefaultTextures           = TRUE;
-        info->TiledResourcesTier             = D3D11_TILED_RESOURCES_NOT_SUPPORTED;
+        info->TiledResourcesTier             = m_tiledResourcesTier;
         info->StandardSwizzle                = FALSE;
         info->UnifiedMemoryArchitecture      = m_dxvkDevice->isUnifiedMemoryArchitecture();
 
@@ -1730,7 +1749,30 @@ namespace dxvk {
         if (FeatureSupportDataSize != sizeof(*info))
           return E_INVALIDARG;
 
-        info->ExtendedNV12SharedTextureSupported = FALSE;
+        info->ExtendedNV12SharedTextureSupported = TRUE;
+      } return S_OK;
+
+      case D3D11_FEATURE_SHADER_CACHE: {
+        auto info = static_cast<D3D11_FEATURE_DATA_SHADER_CACHE*>(pFeatureSupportData);
+
+        if (FeatureSupportDataSize != sizeof(*info))
+          return E_INVALIDARG;
+
+        // DXVK will keep all shaders in memory once created, and all Vulkan
+        // drivers that we know of that can run DXVK have an on-disk cache.
+        info->SupportFlags = D3D11_SHADER_CACHE_SUPPORT_AUTOMATIC_INPROC_CACHE
+                           | D3D11_SHADER_CACHE_SUPPORT_AUTOMATIC_DISK_CACHE;
+      } return S_OK;
+
+      case D3D11_FEATURE_D3D11_OPTIONS5: {
+        auto info = static_cast<D3D11_FEATURE_DATA_D3D11_OPTIONS5*>(pFeatureSupportData);
+
+        if (FeatureSupportDataSize != sizeof(*info))
+          return E_INVALIDARG;
+
+        // Shared resources are all sorts of wonky for obvious
+        // reasons, so don't over-promise things here for now
+        info->SharedResourceTier = D3D11_SHARED_RESOURCE_TIER_1;
       } return S_OK;
 
       default:
@@ -1818,27 +1860,90 @@ namespace dxvk {
           UINT*                     pNumSubresourceTilings,
           UINT                      FirstSubresourceTilingToGet,
           D3D11_SUBRESOURCE_TILING* pSubresourceTilingsForNonPackedMips) {
-    static bool s_errorShown = false;
+    D3D11_COMMON_RESOURCE_DESC desc = { };
+    GetCommonResourceDesc(pTiledResource, &desc);
 
-    if (!std::exchange(s_errorShown, true))
-      Logger::err("D3D11Device::GetResourceTiling: Tiled resources not supported");
+    if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_TILED)) {
+      if (pNumTilesForEntireResource)
+        *pNumTilesForEntireResource = 0;
 
-    if (pNumTilesForEntireResource)
-      *pNumTilesForEntireResource = 0;
+      if (pPackedMipDesc)
+        *pPackedMipDesc = D3D11_PACKED_MIP_DESC();
 
-    if (pPackedMipDesc)
-      *pPackedMipDesc = D3D11_PACKED_MIP_DESC();
+      if (pStandardTileShapeForNonPackedMips)
+        *pStandardTileShapeForNonPackedMips = D3D11_TILE_SHAPE();
 
-    if (pStandardTileShapeForNonPackedMips)
-      *pStandardTileShapeForNonPackedMips = D3D11_TILE_SHAPE();
+      if (pNumSubresourceTilings) {
+        if (pSubresourceTilingsForNonPackedMips) {
+          for (uint32_t i = 0; i < *pNumSubresourceTilings; i++)
+            pSubresourceTilingsForNonPackedMips[i] = D3D11_SUBRESOURCE_TILING();
+        }
 
-    if (pNumSubresourceTilings) {
-      if (pSubresourceTilingsForNonPackedMips) {
-        for (uint32_t i = 0; i < *pNumSubresourceTilings; i++)
-          pSubresourceTilingsForNonPackedMips[i] = D3D11_SUBRESOURCE_TILING();
+        *pNumSubresourceTilings = 0;
+      }
+    } else {
+      DxvkSparsePageTable* sparseInfo = nullptr;
+      uint32_t mipCount = 0;
+
+      if (desc.Dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        Rc<DxvkBuffer> buffer = static_cast<D3D11Buffer*>(pTiledResource)->GetBuffer();
+        sparseInfo = buffer->getSparsePageTable();
+      } else {
+        Rc<DxvkImage> image = GetCommonTexture(pTiledResource)->GetImage();
+        sparseInfo = image->getSparsePageTable();
+        mipCount = image->info().mipLevels;
       }
 
-      *pNumSubresourceTilings = 0;
+      if (pNumTilesForEntireResource)
+        *pNumTilesForEntireResource = sparseInfo->getPageCount();
+
+      if (pPackedMipDesc) {
+        auto properties = sparseInfo->getProperties();
+
+        if (properties.mipTailSize) {
+          pPackedMipDesc->NumStandardMips = properties.pagedMipCount;
+          pPackedMipDesc->NumPackedMips = mipCount - properties.pagedMipCount;
+          pPackedMipDesc->NumTilesForPackedMips = sparseInfo->getPageCount() - properties.mipTailPageIndex;
+          pPackedMipDesc->StartTileIndexInOverallResource = properties.mipTailPageIndex;
+        } else {
+          pPackedMipDesc->NumStandardMips = mipCount;
+          pPackedMipDesc->NumPackedMips = 0;
+          pPackedMipDesc->NumTilesForPackedMips = 0;
+          pPackedMipDesc->StartTileIndexInOverallResource = 0;
+        }
+      }
+
+      if (pStandardTileShapeForNonPackedMips) {
+        auto properties = sparseInfo->getProperties();
+        pStandardTileShapeForNonPackedMips->WidthInTexels = properties.pageRegionExtent.width;
+        pStandardTileShapeForNonPackedMips->HeightInTexels = properties.pageRegionExtent.height;
+        pStandardTileShapeForNonPackedMips->DepthInTexels = properties.pageRegionExtent.depth;
+      }
+
+      if (pNumSubresourceTilings) {
+        uint32_t subresourceCount = sparseInfo->getSubresourceCount();
+        uint32_t tilingCount = subresourceCount - std::min(FirstSubresourceTilingToGet, subresourceCount);
+        tilingCount = std::min(tilingCount, *pNumSubresourceTilings);
+
+        for (uint32_t i = 0; i < tilingCount; i++) {
+          auto subresourceInfo = sparseInfo->getSubresourceProperties(FirstSubresourceTilingToGet + i);
+          auto dstInfo = &pSubresourceTilingsForNonPackedMips[i];
+
+          if (subresourceInfo.isMipTail) {
+            dstInfo->WidthInTiles = 0u;
+            dstInfo->HeightInTiles = 0u;
+            dstInfo->DepthInTiles = 0u;
+            dstInfo->StartTileIndexInOverallResource = D3D11_PACKED_TILE;
+          } else {
+            dstInfo->WidthInTiles = subresourceInfo.pageCount.width;
+            dstInfo->HeightInTiles = subresourceInfo.pageCount.height;
+            dstInfo->DepthInTiles = subresourceInfo.pageCount.depth;
+            dstInfo->StartTileIndexInOverallResource = subresourceInfo.pageIndex;
+          }
+        }
+
+        *pNumSubresourceTilings = tilingCount;
+      }
     }
   }
   
@@ -1904,6 +2009,15 @@ namespace dxvk {
     if (!adapter->checkFeatureSupport(features))
       return false;
     
+    if (featureLevel >= D3D_FEATURE_LEVEL_12_0) {
+      D3D11_TILED_RESOURCES_TIER tiledResourcesTier = DetermineTiledResourcesTier(
+        adapter->features(),
+        adapter->devicePropertiesExt());
+
+      if (tiledResourcesTier < D3D11_TILED_RESOURCES_TIER_2)
+        return false;
+    }
+
     // TODO also check for required limits
     return true;
   }
@@ -1917,21 +2031,23 @@ namespace dxvk {
 
     enabled.core.features.geometryShader                          = VK_TRUE;
     enabled.core.features.robustBufferAccess                      = VK_TRUE;
-    enabled.core.features.shaderStorageImageWriteWithoutFormat    = VK_TRUE;
     enabled.core.features.depthBounds                             = supported.core.features.depthBounds;
 
     enabled.vk11.shaderDrawParameters                             = VK_TRUE;
 
     enabled.vk12.samplerMirrorClampToEdge                         = VK_TRUE;
-    enabled.vk12.timelineSemaphore                                = VK_TRUE;
 
-    enabled.vk13.shaderDemoteToHelperInvocation                   = supported.vk13.shaderDemoteToHelperInvocation;
+    enabled.vk13.shaderDemoteToHelperInvocation                   = VK_TRUE;
 
     enabled.extMemoryPriority.memoryPriority                      = supported.extMemoryPriority.memoryPriority;
 
     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor      = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor;
     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor  = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor;
-    
+
+    D3D11_TILED_RESOURCES_TIER sparseTier = DetermineTiledResourcesTier(supported, adapter->devicePropertiesExt());
+    VkBool32 hasSparseTier1 = sparseTier >= D3D11_TILED_RESOURCES_TIER_1;
+    VkBool32 hasSparseTier2 = sparseTier >= D3D11_TILED_RESOURCES_TIER_2;
+
     if (supported.extCustomBorderColor.customBorderColorWithoutFormat) {
       enabled.extCustomBorderColor.customBorderColors             = VK_TRUE;
       enabled.extCustomBorderColor.customBorderColorWithoutFormat = VK_TRUE;
@@ -1979,16 +2095,37 @@ namespace dxvk {
       enabled.core.features.multiDrawIndirect                     = VK_TRUE;
       enabled.core.features.shaderFloat64                         = supported.core.features.shaderFloat64;
       enabled.core.features.shaderInt64                           = supported.core.features.shaderInt64;
-      enabled.core.features.shaderStorageImageReadWithoutFormat   = supported.core.features.shaderStorageImageReadWithoutFormat;
       enabled.core.features.tessellationShader                    = VK_TRUE;
+      enabled.core.features.sparseBinding                         = hasSparseTier1;
+      enabled.core.features.sparseResidencyBuffer                 = hasSparseTier1;
+      enabled.core.features.sparseResidencyImage2D                = hasSparseTier1;
+      enabled.core.features.sparseResidencyImage3D                = hasSparseTier1 && supported.core.features.sparseResidencyImage3D;
+      enabled.core.features.sparseResidency2Samples               = hasSparseTier1 && supported.core.features.sparseResidency2Samples;
+      enabled.core.features.sparseResidency4Samples               = hasSparseTier1 && supported.core.features.sparseResidency4Samples;
+      enabled.core.features.sparseResidency8Samples               = hasSparseTier1 && supported.core.features.sparseResidency8Samples;
+      enabled.core.features.sparseResidency16Samples              = hasSparseTier1 && supported.core.features.sparseResidency16Samples;
+      enabled.core.features.sparseResidencyAliased                = hasSparseTier1;
     }
     
     if (featureLevel >= D3D_FEATURE_LEVEL_11_1) {
       enabled.core.features.logicOp                               = VK_TRUE;
       enabled.core.features.variableMultisampleRate               = VK_TRUE;
       enabled.core.features.vertexPipelineStoresAndAtomics        = VK_TRUE;
+      enabled.core.features.shaderResourceResidency               = hasSparseTier2;
+      enabled.core.features.shaderResourceMinLod                  = hasSparseTier2;
+      enabled.vk12.samplerFilterMinmax                            = hasSparseTier2;
     }
-    
+
+    if (featureLevel >= D3D_FEATURE_LEVEL_12_0) {
+      enabled.core.features.shaderResourceResidency               = VK_TRUE;
+      enabled.core.features.shaderResourceMinLod                  = VK_TRUE;
+      enabled.core.features.sparseBinding                         = VK_TRUE;
+      enabled.core.features.sparseResidencyBuffer                 = VK_TRUE;
+      enabled.core.features.sparseResidencyImage2D                = VK_TRUE;
+      enabled.core.features.sparseResidencyAliased                = VK_TRUE;
+      enabled.vk12.samplerFilterMinmax                            = VK_TRUE;
+    }
+
     return enabled;
   }
   
@@ -2036,33 +2173,33 @@ namespace dxvk {
     if (pFlags2 != nullptr) *pFlags2 = 0;
 
     // Unsupported or invalid format
-    if (Format != DXGI_FORMAT_UNKNOWN && fmtMapping.Format == VK_FORMAT_UNDEFINED)
+    if (Format && fmtMapping.Format == VK_FORMAT_UNDEFINED)
       return E_FAIL;
     
     // Query Vulkan format properties and supported features for it
     const DxvkFormatInfo* fmtProperties = lookupFormatInfo(fmtMapping.Format);
 
-    VkFormatProperties fmtSupport = fmtMapping.Format != VK_FORMAT_UNDEFINED
-      ? m_dxvkAdapter->formatProperties(fmtMapping.Format)
-      : VkFormatProperties();
+    DxvkFormatFeatures fmtSupport = fmtMapping.Format != VK_FORMAT_UNDEFINED
+      ? m_dxvkDevice->getFormatFeatures(fmtMapping.Format)
+      : DxvkFormatFeatures();
     
-    VkFormatFeatureFlags bufFeatures = fmtSupport.bufferFeatures;
-    VkFormatFeatureFlags imgFeatures = fmtSupport.optimalTilingFeatures | fmtSupport.linearTilingFeatures;
+    VkFormatFeatureFlags2 bufFeatures = fmtSupport.buffer;
+    VkFormatFeatureFlags2 imgFeatures = fmtSupport.optimal | fmtSupport.linear;
 
     // For multi-plane images, we want to check available view formats as well
     if (fmtProperties->flags.test(DxvkFormatFlag::MultiPlane)) {
-      const VkFormatFeatureFlags featureMask
-        = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-        | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
-        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT
-        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      const VkFormatFeatureFlags2 featureMask
+        = VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT
+        | VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT
+        | VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT
+        | VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT
+        | VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 
       DXGI_VK_FORMAT_FAMILY formatFamily = LookupFamily(Format, DXGI_VK_FORMAT_MODE_ANY);
 
       for (uint32_t i = 0; i < formatFamily.FormatCount; i++) {
-        VkFormatProperties viewFmtSupport = m_dxvkAdapter->formatProperties(formatFamily.Formats[i]);
-        imgFeatures |= (viewFmtSupport.optimalTilingFeatures | viewFmtSupport.linearTilingFeatures) & featureMask;
+        DxvkFormatFeatures viewFmtSupport = m_dxvkDevice->getFormatFeatures(formatFamily.Formats[i]);
+        imgFeatures |= (viewFmtSupport.optimal | viewFmtSupport.linear) & featureMask;
       }
     }
     
@@ -2070,12 +2207,11 @@ namespace dxvk {
     UINT flags2 = 0;
 
     // Format can be used for shader resource views with buffers
-    if (bufFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT
-     || Format == DXGI_FORMAT_UNKNOWN)
+    if ((bufFeatures & VK_FORMAT_FEATURE_2_UNIFORM_TEXEL_BUFFER_BIT) || !Format)
       flags1 |= D3D11_FORMAT_SUPPORT_BUFFER;
     
     // Format can be used for vertex data
-    if (bufFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)
+    if (bufFeatures & VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT)
       flags1 |= D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER;
     
     // Format can be used for index data. Only
@@ -2101,19 +2237,30 @@ namespace dxvk {
      || Format == DXGI_FORMAT_R32G32B32A32_SINT)
       flags1 |= D3D11_FORMAT_SUPPORT_SO_BUFFER;
     
-    if (imgFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-     || imgFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) {
+    if (imgFeatures & (VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)) {
       const VkFormat depthFormat = LookupFormat(Format, DXGI_VK_FORMAT_MODE_DEPTH).Format;
       
-      if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_1D)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE1D;
-      if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_2D)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE2D;
-      if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_3D)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE3D;
-      
+      if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_1D, 0)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE1D;
+      if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_2D, 0)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE2D;
+      if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_3D, 0)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE3D;
+
+      // We only support tiled resources with a single aspect
+      VkImageAspectFlags sparseAspects = VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT;
+
+      if (m_tiledResourcesTier && !(fmtProperties->aspectMask & ~sparseAspects)) {
+        VkImageCreateFlags flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT
+                                 | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT
+                                 | VK_IMAGE_CREATE_SPARSE_ALIASED_BIT;
+
+        if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_2D, flags))
+          flags2 |= D3D11_FORMAT_SUPPORT2_TILED;
+      }
+
       flags1 |= D3D11_FORMAT_SUPPORT_MIP
              |  D3D11_FORMAT_SUPPORT_CAST_WITHIN_BIT_LAYOUT;
-    
+
       // Format can be read 
-      if (imgFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
+      if (imgFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) {
         flags1 |= D3D11_FORMAT_SUPPORT_TEXTURECUBE
                |  D3D11_FORMAT_SUPPORT_SHADER_LOAD
                |  D3D11_FORMAT_SUPPORT_SHADER_GATHER
@@ -2127,7 +2274,7 @@ namespace dxvk {
       }
       
       // Format is a color format that can be used for rendering
-      if (imgFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) {
+      if (imgFeatures & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT) {
         flags1 |= D3D11_FORMAT_SUPPORT_RENDER_TARGET
                |  D3D11_FORMAT_SUPPORT_MIP_AUTOGEN
                |  D3D11_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT;
@@ -2137,14 +2284,14 @@ namespace dxvk {
       }
       
       // Format supports blending when used for rendering
-      if (imgFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
+      if (imgFeatures & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT)
         flags1 |= D3D11_FORMAT_SUPPORT_BLENDABLE;
       
       // Format is a depth-stencil format that can be used for rendering
-      if (imgFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+      if (imgFeatures & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)
         flags1 |= D3D11_FORMAT_SUPPORT_DEPTH_STENCIL;
       
-      // FIXME implement properly. This would require a VkSurface.
+      // Report supported swap chain formats
       if (Format == DXGI_FORMAT_R8G8B8A8_UNORM
        || Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
        || Format == DXGI_FORMAT_B8G8R8A8_UNORM
@@ -2155,16 +2302,14 @@ namespace dxvk {
         flags1 |= D3D11_FORMAT_SUPPORT_DISPLAY;
       
       // Query multisample support for this format
-      VkImageFormatProperties imgFmtProperties;
-      
-      VkResult status = m_dxvkAdapter->imageFormatProperties(fmtMapping.Format,
-        VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-        (fmtProperties->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)
-          ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-          : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-        0, imgFmtProperties);
-      
-      if (status == VK_SUCCESS && imgFmtProperties.sampleCounts > VK_SAMPLE_COUNT_1_BIT) {
+      VkImageUsageFlags usage = (fmtProperties->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)
+        ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+        : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+      auto limits = m_dxvkDevice->getFormatLimits(fmtMapping.Format,
+        VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0);
+
+      if (limits && limits->sampleCounts > VK_SAMPLE_COUNT_1_BIT) {
         flags1 |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET
                |  D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE
                |  D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
@@ -2172,19 +2317,27 @@ namespace dxvk {
     }
     
     // Format can be used for storage images or storage texel buffers
-    if ((bufFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
-     && (imgFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+    if ((bufFeatures & VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT)
+     && (imgFeatures & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)
+     && (imgFeatures & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) {
       flags1 |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
       flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE;
       
-      if (m_dxvkDevice->features().core.features.shaderStorageImageReadWithoutFormat
-       || Format == DXGI_FORMAT_R32_UINT
-       || Format == DXGI_FORMAT_R32_SINT
-       || Format == DXGI_FORMAT_R32_FLOAT)
-        flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
+      if (m_dxbcOptions.supportsTypedUavLoadR32) {
+        // If the R32 formats are supported without format declarations,
+        // we can optionally support additional formats for typed loads
+        if (imgFeatures & VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT)
+          flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
+      } else {
+        // Otherwise, we need to emit format declarations, so we can
+        // only support the basic set of R32 formats for typed loads
+        if (Format == DXGI_FORMAT_R32_FLOAT
+         || Format == DXGI_FORMAT_R32_UINT
+         || Format == DXGI_FORMAT_R32_SINT)
+          flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
+      }
       
-      if (Format == DXGI_FORMAT_R32_UINT
-       || Format == DXGI_FORMAT_R32_SINT) {
+      if (Format == DXGI_FORMAT_R32_UINT || Format == DXGI_FORMAT_R32_SINT) {
         flags2 |= D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_ADD
                |  D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS
                |  D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_COMPARE_STORE_OR_COMPARE_EXCHANGE
@@ -2209,20 +2362,16 @@ namespace dxvk {
   }
   
   
-  BOOL D3D11Device::GetImageTypeSupport(VkFormat Format, VkImageType Type) const {
-    VkImageFormatProperties props;
+  BOOL D3D11Device::GetImageTypeSupport(VkFormat Format, VkImageType Type, VkImageCreateFlags Flags) const {
+    auto properties = m_dxvkDevice->getFormatLimits(Format,
+      Type, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, Flags);
     
-    VkResult status = m_dxvkAdapter->imageFormatProperties(
-      Format, Type, VK_IMAGE_TILING_OPTIMAL,
-      VK_IMAGE_USAGE_SAMPLED_BIT, 0, props);
-    
-    if (status != VK_SUCCESS) {
-      status = m_dxvkAdapter->imageFormatProperties(
-        Format, Type, VK_IMAGE_TILING_LINEAR,
-        VK_IMAGE_USAGE_SAMPLED_BIT, 0, props);
+    if (!properties) {
+      properties = m_dxvkDevice->getFormatLimits(Format,
+        Type, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT, Flags);
     }
     
-    return status == VK_SUCCESS;
+    return properties.has_value();
   }
   
   
@@ -2262,6 +2411,7 @@ namespace dxvk {
     if (ppResource == nullptr)
       return S_FALSE;
 
+#ifdef _WIN32
     HANDLE ntHandle = IsKmtHandle ? openKmtHandle(hResource) : hResource;
 
     if (ntHandle == INVALID_HANDLE_VALUE) {
@@ -2304,6 +2454,10 @@ namespace dxvk {
       Logger::err(e.message());
       return E_INVALIDARG;
     }
+#else
+    Logger::warn("D3D11Device::OpenSharedResourceGeneric: Not supported on this platform.");
+    return E_INVALIDARG;
+#endif
   }
 
 
@@ -2419,6 +2573,32 @@ namespace dxvk {
   }
 
 
+  D3D11_TILED_RESOURCES_TIER D3D11Device::DetermineTiledResourcesTier(
+    const DxvkDeviceFeatures&         Features,
+    const DxvkDeviceInfo&             Properties) {
+    if (!Features.core.features.sparseBinding
+     || !Features.core.features.sparseResidencyBuffer
+     || !Features.core.features.sparseResidencyImage2D
+     || !Features.core.features.sparseResidencyAliased
+     || !Properties.core.properties.sparseProperties.residencyStandard2DBlockShape)
+      return D3D11_TILED_RESOURCES_NOT_SUPPORTED;
+
+    if (!Features.core.features.shaderResourceResidency
+     || !Features.core.features.shaderResourceMinLod
+     || !Features.vk12.samplerFilterMinmax
+     || !Properties.vk12.filterMinmaxSingleComponentFormats
+     || !Properties.core.properties.sparseProperties.residencyNonResidentStrict
+     || Properties.core.properties.sparseProperties.residencyAlignedMipSize)
+      return D3D11_TILED_RESOURCES_TIER_1;
+
+    if (!Features.core.features.sparseResidencyImage3D
+     || !Properties.core.properties.sparseProperties.residencyStandard3DBlockShape)
+      return D3D11_TILED_RESOURCES_TIER_2;
+
+    return D3D11_TILED_RESOURCES_TIER_3;
+  }
+
+
   D3D_FEATURE_LEVEL D3D11Device::GetMaxFeatureLevel(const Rc<DxvkInstance>& pInstance) {
     static const std::array<std::pair<std::string, D3D_FEATURE_LEVEL>, 9> s_featureLevels = {{
       { "12_1", D3D_FEATURE_LEVEL_12_1 },
@@ -2440,9 +2620,10 @@ namespace dxvk {
         return pair.first == maxLevel;
       });
     
-    return entry != s_featureLevels.end()
-      ? entry->second
-      : D3D_FEATURE_LEVEL_11_1;
+    if (entry != s_featureLevels.end())
+      return entry->second;
+
+    return D3D_FEATURE_LEVEL_12_0;
   }
   
 
@@ -3055,7 +3236,7 @@ namespace dxvk {
     // Make sure the back buffer size is not zero
     DXGI_SWAP_CHAIN_DESC1 desc = *pDesc;
     
-    GetWindowClientSize(hWnd,
+    wsi::getWindowSize(hWnd,
       desc.Width  ? nullptr : &desc.Width,
       desc.Height ? nullptr : &desc.Height);
     

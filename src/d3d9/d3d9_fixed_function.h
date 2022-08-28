@@ -38,6 +38,13 @@ namespace dxvk {
     uint32_t SpecUBO;
   };
 
+  struct D3D9AlphaTestContext {
+    uint32_t alphaId;
+    uint32_t alphaPrecisionId;
+    uint32_t alphaFuncId;
+    uint32_t alphaRefId;
+  };
+
   struct D3D9FixedFunctionOptions {
     D3D9FixedFunctionOptions(const D3D9Options* options);
 
@@ -47,6 +54,8 @@ namespace dxvk {
   // Returns new oFog if VS
   // Returns new oColor if PS
   uint32_t DoFixedFunctionFog(D3D9ShaderSpecConstantManager& spec, SpirvModule& spvModule, const D3D9FogContext& fogCtx);
+
+  void DoFixedFunctionAlphaTest(SpirvModule& spvModule, const D3D9AlphaTestContext& ctx);
 
   // Returns a render state block
   uint32_t SetupRenderStateBlock(SpirvModule& spvModule, uint32_t count);

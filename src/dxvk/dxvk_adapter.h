@@ -3,6 +3,7 @@
 #include "dxvk_device_info.h"
 #include "dxvk_extensions.h"
 #include "dxvk_include.h"
+#include "dxvk_format.h"
 
 namespace dxvk {
   
@@ -20,7 +21,7 @@ namespace dxvk {
   };
 
   /**
-   * \brief Adapter memory heap info
+   * \brief Adapter memory hfeap info
    * 
    * Stores info about a heap, and the amount
    * of memory allocated from it by the app.
@@ -48,6 +49,7 @@ namespace dxvk {
   struct DxvkAdapterQueueIndices {
     uint32_t graphics;
     uint32_t transfer;
+    uint32_t sparse;
   };
   
   /**
@@ -136,33 +138,14 @@ namespace dxvk {
     VkPhysicalDeviceMemoryProperties memoryProperties() const;
 
     /**
-     * \brief Queries format support
-     * 
-     * \param [in] format The format to query
-     * \returns Format support info
-     */
-    VkFormatProperties formatProperties(
-      VkFormat format) const;
-    
-    /**
-     * \brief Queries image format support
-     * 
+     * \brief Queries format feature support
+     *
      * \param [in] format Format to query
-     * \param [in] type Image type
-     * \param [in] tiling Image tiling
-     * \param [in] usage Image usage flags
-     * \param [in] flags Image create flags
-     * \param [out] properties Format properties
-     * \returns \c VK_SUCCESS or \c VK_ERROR_FORMAT_NOT_SUPPORTED
+     * \returns Format feature bits
      */
-    VkResult imageFormatProperties(
-      VkFormat                  format,
-      VkImageType               type,
-      VkImageTiling             tiling,
-      VkImageUsageFlags         usage,
-      VkImageCreateFlags        flags,
-      VkImageFormatProperties&  properties) const;
-    
+    DxvkFormatFeatures getFormatFeatures(
+            VkFormat                  format) const;
+
     /**
      * \brief Retrieves queue family indices
      * \returns Indices for all queue families

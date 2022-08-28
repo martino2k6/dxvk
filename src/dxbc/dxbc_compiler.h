@@ -181,9 +181,6 @@ namespace dxvk {
     uint32_t builtinLayer         = 0;
     uint32_t builtinViewportId    = 0;
     
-    uint32_t builtinLaneId        = 0;
-    uint32_t killState            = 0;
-
     uint32_t pushConstantId       = 0;
   };
   
@@ -349,7 +346,7 @@ namespace dxvk {
     uint32_t typeId;
     uint32_t varId;
     uint32_t stride;
-    uint32_t align;
+    bool isSsbo;
   };
   
 
@@ -712,6 +709,9 @@ namespace dxvk {
     void emitInterpolate(
       const DxbcShaderInstruction&  ins);
     
+    void emitSparseCheckAccess(
+      const DxbcShaderInstruction&  ins);
+    
     void emitTextureQuery(
       const DxbcShaderInstruction&  ins);
     
@@ -882,6 +882,16 @@ namespace dxvk {
             DxbcRegisterValue       value,
             DxbcOpModifiers         modifiers);
     
+    ///////////////////////////
+    // Sparse feedback methods
+    uint32_t emitExtractSparseTexel(
+            uint32_t          texelTypeId,
+            uint32_t          resultId);
+
+    void emitStoreSparseFeedback(
+      const DxbcRegister&     feedbackRegister,
+            uint32_t          resultId);
+
     ////////////////////////////////
     // Pointer manipulation methods
     DxbcRegisterPointer emitArrayAccess(
@@ -928,7 +938,8 @@ namespace dxvk {
     DxbcRegisterValue emitRawBufferLoad(
       const DxbcRegister&           operand,
             DxbcRegisterValue       elementIndex,
-            DxbcRegMask             writeMask);
+            DxbcRegMask             writeMask,
+            uint32_t&               sparseFeedbackId);
     
     void emitRawBufferStore(
       const DxbcRegister&           operand,
@@ -1061,12 +1072,6 @@ namespace dxvk {
             DxbcSystemValue         sv,
             uint32_t                srcArray);
     
-    ///////////////////////////////
-    // Some state checking methods
-    DxbcConditional emitBeginPsKillTest();
-
-    void emitEndPsKillTest(const DxbcConditional& cond);
-    
     //////////////////////////////////////
     // Common function definition methods
     void emitInit();
@@ -1155,7 +1160,7 @@ namespace dxvk {
     uint32_t emitSamplePosArray();
     
     void emitFloatControl();
-    
+
     ///////////////////////////////
     // Variable definition methods
     uint32_t emitNewVariable(
@@ -1229,7 +1234,10 @@ namespace dxvk {
     
     uint32_t getPointerTypeId(
       const DxbcRegisterInfo& type);
-    
+
+    uint32_t getSparseResultTypeId(
+            uint32_t baseType);
+
     uint32_t getPerVertexBlockId();
 
     uint32_t getFunctionId(

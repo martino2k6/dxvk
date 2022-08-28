@@ -26,6 +26,12 @@ if get_option('build_id')
   ]
 endif
 
+dxvk_include_dirs = [
+  './include',
+  './include/vulkan/include',
+  './include/spirv/include'
+]
+
 if platform == 'windows'
   compiler_args += [
     '-DNOMINMAX',
@@ -63,7 +69,6 @@ if platform == 'windows'
     dxvk_library_path = meson.current_source_dir() + '/lib32'
   endif
 
-  lib_vulkan  = cpp.find_library('vulkan-1', dirs : dxvk_library_path)
   lib_d3d9    = cpp.find_library('d3d9')
   lib_d3d11   = cpp.find_library('d3d11')
   lib_dxgi    = cpp.find_library('dxgi')
@@ -91,16 +96,25 @@ if platform == 'windows'
     )
   endif
 
-  dxvk_include_path = include_directories('./include')
+  dxvk_wsi = 'win32'
+  compiler_args += ['-DDXVK_WSI_WIN32']
 else
-  lib_vulkan = cpp.find_library('vulkan')
   lib_sdl2   = cpp.find_library('SDL2')
 
   wrc           = find_program('touch')
   wrc_generator = generator(wrc, output : [ '@BASENAME@_ignored.h' ], arguments : [ '@OUTPUT@' ] )
 
-  dxvk_include_path = include_directories('./include', './include/native', './include/native/windows', './include/native/directx')
+  dxvk_include_dirs += [
+    './include/native',
+    './include/native/windows',
+    './include/native/directx'
+  ]
+
+  dxvk_wsi = 'sdl2'
+  compiler_args += ['-DDXVK_WSI_SDL2']
 endif
+
+dxvk_include_path = include_directories(dxvk_include_dirs)
 
 add_project_arguments(cpp.get_supported_arguments(compiler_args), language: 'cpp')
 add_project_arguments(cc.get_supported_arguments(compiler_args), language: 'c')
@@ -126,10 +140,6 @@ dxvk_version = vcs_tag(
   input:  'version.h.in',
   output: 'version.h',
 )
-
-if platform != 'windows'
-  error('Non-Windows platforms not supported... yet.')
-endif
 
 subdir('src')
 

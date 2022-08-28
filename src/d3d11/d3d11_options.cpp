@@ -4,6 +4,14 @@
 
 namespace dxvk {
   
+  static bool IsAPITracingDXGI() {
+#ifdef _WIN32
+    return !!::GetModuleHandle("dxgitrace.dll");
+#else
+    return false;
+#endif
+  }
+
   D3D11Options::D3D11Options(const Config& config, const Rc<DxvkDevice>& device) {
     this->dcSingleUseMode       = config.getOption<bool>("d3d11.dcSingleUseMode", true);
     this->enableRtOutputNanFixup   = config.getOption<bool>("d3d11.enableRtOutputNanFixup", false);
@@ -17,6 +25,7 @@ namespace dxvk {
     this->invariantPosition     = config.getOption<bool>("d3d11.invariantPosition", true);
     this->floatControls         = config.getOption<bool>("d3d11.floatControls", true);
     this->disableMsaa           = config.getOption<bool>("d3d11.disableMsaa", false);
+    this->enableContextLock     = config.getOption<bool>("d3d11.enableContextLock", false);
     this->deferSurfaceCreation  = config.getOption<bool>("dxgi.deferSurfaceCreation", false);
     this->numBackBuffers        = config.getOption<int32_t>("dxgi.numBackBuffers", 0);
     this->maxFrameLatency       = config.getOption<int32_t>("dxgi.maxFrameLatency", 0);
@@ -39,7 +48,7 @@ namespace dxvk {
 
     auto cachedDynamicResources = config.getOption<std::string>("d3d11.cachedDynamicResources", std::string());
 
-    if (::GetModuleHandle("dxgitrace.dll")) {
+    if (IsAPITracingDXGI()) {
       // apitrace reads back all mapped resources on the CPU, so
       // allocating everything in cached memory is necessary to
       // achieve acceptable performance

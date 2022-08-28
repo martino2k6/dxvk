@@ -289,6 +289,11 @@ namespace dxvk {
     { R"(\\Stray-Win64-Shipping\.exe$)", {{
       { "d3d11.ignoreGraphicsBarriers",     "True" },
     }} },
+    /* Metal Gear Solid V: Ground Zeroes          *
+     * Texture quality can break at high vram     */
+    { R"(\\MgsGroundZeroes\.exe$)", {{
+      { "dxgi.maxDeviceMemory",     "4095" },
+    }} },
 
     /**********************************************/
     /* D3D9 GAMES                                 */
@@ -413,10 +418,6 @@ namespace dxvk {
     { R"(\\SpellForce2.*\.exe$)", {{
       { "d3d9.forceSamplerTypeSpecConstants", "True" },
     }} },
-    /* Everquest 2                                */
-    { R"(\\EverQuest2.*\.exe$)", {{
-      { "d3d9.alphaTestWiggleRoom", "True" },
-    }} },
     /* Tomb Raider: Legend                       */
     { R"(\\trl\.exe$)", {{
       { "d3d9.apitraceMode",                "True" },
@@ -508,8 +509,8 @@ namespace dxvk {
     { R"(\\BBCF\.exe$)", {{
       { "d3d9.floatEmulation",              "Strict" },
     }} },
-    /* Resident Evil games                      */
-    { R"(\\(rerev|rerev2|re0hd|bhd|re5dx9)\.exe$)", {{
+    /* Resident Evil games using MT Framework   */
+    { R"(\\(rerev|re0hd|bhd)\.exe$)", {{
       { "d3d9.allowDirectBufferMapping",                "False" },
     }} },
     /* Limbo                                    */
@@ -570,10 +571,10 @@ namespace dxvk {
     { R"(\\nfs3\.exe$)", {{
       { "d3d9.enableDialogMode",          "True" },
     }} },
-    /* Ninja Blade                              *
-     * Transparent main character on Nvidia     */
-    { R"(\\NinjaBlade\.exe$)", {{
-      { "d3d9.alphaTestWiggleRoom",       "True" },
+    /* Beyond Good And Evil                     *
+     * UI breaks at high fps                     */
+    { R"(\\BGE\.exe$)", {{
+      { "d3d9.maxFrameRate",                "60" },
     }} },
     /* YS Origin                                *
      * Helps very bad frametimes in some areas  */

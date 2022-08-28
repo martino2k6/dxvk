@@ -3,24 +3,30 @@
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
 
-#ifdef _WIN32
 #define VK_USE_PLATFORM_WIN32_KHR 1
-#endif
 #include <vulkan/vulkan.h>
 
 #define VULKAN_FN(name) \
   ::PFN_ ## name name = reinterpret_cast<::PFN_ ## name>(sym(#name))
 
 namespace dxvk::vk {
-  
+
   /**
    * \brief Vulkan library loader
    * 
-   * Provides methods to load Vulkan functions that
-   * can be called before creating a  instance.
+   * Dynamically loads the vulkan-1 library and
+   * provides methods to load Vulkan functions that
+   * can be called before creating a instance.
    */
   struct LibraryLoader : public RcObject {
+    LibraryLoader();
+    ~LibraryLoader();
+    PFN_vkVoidFunction sym(VkInstance instance, const char* name) const;
     PFN_vkVoidFunction sym(const char* name) const;
+    bool               valid() const;
+  protected:
+    const HMODULE                   m_library;
+    const PFN_vkGetInstanceProcAddr m_getInstanceProcAddr;
   };
   
   
@@ -31,12 +37,13 @@ namespace dxvk::vk {
    * called for a specific instance.
    */
   struct InstanceLoader : public RcObject {
-    InstanceLoader(bool owned, VkInstance instance);
+    InstanceLoader(const Rc<LibraryLoader>& library, bool owned, VkInstance instance);
     PFN_vkVoidFunction sym(const char* name) const;
     VkInstance instance() const { return m_instance; }
   protected:
-    const VkInstance m_instance;
-    const bool       m_owned;
+    Rc<LibraryLoader> m_library;
+    const VkInstance  m_instance;
+    const bool        m_owned;
   };
   
   
@@ -47,10 +54,11 @@ namespace dxvk::vk {
    * specific device.
    */
   struct DeviceLoader : public RcObject {
-    DeviceLoader(bool owned, VkInstance instance, VkDevice device);
+    DeviceLoader(const Rc<InstanceLoader>& library, bool owned, VkDevice device);
     PFN_vkVoidFunction sym(const char* name) const;
     VkDevice device() const { return m_device; }
   protected:
+    Rc<InstanceLoader>            m_library;
     const PFN_vkGetDeviceProcAddr m_getDeviceProcAddr;
     const VkDevice                m_device;
     const bool                    m_owned;
@@ -80,7 +88,7 @@ namespace dxvk::vk {
    * are independent of any Vulkan devices.
    */
   struct InstanceFn : InstanceLoader {
-    InstanceFn(bool owned, VkInstance instance);
+    InstanceFn(const Rc<LibraryLoader>& library, bool owned, VkInstance instance);
     ~InstanceFn();
     
     VULKAN_FN(vkCreateDevice);
@@ -162,7 +170,7 @@ namespace dxvk::vk {
    * This ensures that no slow dispatch code is executed.
    */
   struct DeviceFn : DeviceLoader {
-    DeviceFn(bool owned, VkInstance instance, VkDevice device);
+    DeviceFn(const Rc<InstanceLoader>& library, bool owned, VkDevice device);
     ~DeviceFn();
     
     VULKAN_FN(vkDestroyDevice);

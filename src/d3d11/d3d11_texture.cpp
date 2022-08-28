@@ -3,6 +3,7 @@
 #include "d3d11_texture.h"
 
 #include "../util/util_shared_res.h"
+#include "../util/util_win32_compat.h"
 
 namespace dxvk {
   
@@ -135,10 +136,16 @@ namespace dxvk {
     if (m_desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE)
       imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     
+    if (m_desc.MiscFlags & D3D11_RESOURCE_MISC_TILED) {
+      imageInfo.flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT
+                      |  VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT
+                      |  VK_IMAGE_CREATE_SPARSE_ALIASED_BIT;
+    }
+
     if (Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D &&
         (m_desc.BindFlags & D3D11_BIND_RENDER_TARGET))
       imageInfo.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
-    
+
     // Swap chain back buffers need to be shader readable
     if (DxgiUsage & DXGI_USAGE_BACK_BUFFER) {
       imageInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -359,7 +366,7 @@ namespace dxvk {
     if (imageInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
       // Check whether the given combination of image
       // view type and view format is actually supported
-      VkFormatFeatureFlags features = GetImageFormatFeatures(BindFlags);
+      VkFormatFeatureFlags2 features = GetImageFormatFeatures(BindFlags);
       
       if (!CheckFormatFeatureSupport(viewFormat.Format, features))
         return false;
@@ -395,7 +402,7 @@ namespace dxvk {
   }
   
   
-  HRESULT D3D11CommonTexture::NormalizeTextureProperties(D3D11_COMMON_TEXTURE_DESC* pDesc) {
+  HRESULT D3D11CommonTexture::NormalizeTextureProperties(D3D11_COMMON_TEXTURE_DESC* pDesc, D3D11_TILED_RESOURCES_TIER TiledTier) {
     if (pDesc->Width == 0 || pDesc->Height == 0 || pDesc->Depth == 0 || pDesc->ArraySize == 0)
       return E_INVALIDARG;
     
@@ -414,9 +421,23 @@ namespace dxvk {
                          != (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET))
       return E_INVALIDARG;
 
-    // TILE_POOL is invalid, but we don't support TILED either
-    if (pDesc->MiscFlags & (D3D11_RESOURCE_MISC_TILE_POOL | D3D11_RESOURCE_MISC_TILED))
+    // TILE_POOL is invalid for textures
+    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILE_POOL)
       return E_INVALIDARG;
+
+    // Perform basic validation for tiled resources
+    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED) {
+      UINT invalidFlags = D3D11_RESOURCE_MISC_SHARED
+                        | D3D11_RESOURCE_MISC_SHARED_NTHANDLE
+                        | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+                        | D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
+
+      if ((pDesc->MiscFlags & invalidFlags)
+       || (pDesc->Usage != D3D11_USAGE_DEFAULT)
+       || (pDesc->CPUAccessFlags)
+       || (!TiledTier))
+        return E_INVALIDARG;
+    }
 
     // Use the maximum possible mip level count if the supplied
     // mip level count is either unspecified (0) or invalid
@@ -444,77 +465,73 @@ namespace dxvk {
   BOOL D3D11CommonTexture::CheckImageSupport(
     const DxvkImageCreateInfo*  pImageInfo,
           VkImageTiling         Tiling) const {
-    const Rc<DxvkAdapter> adapter = m_device->GetDXVKDevice()->adapter();
-    
     VkImageUsageFlags usage = pImageInfo->usage;
 
     if (pImageInfo->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
-    VkImageFormatProperties formatProps = { };
-    VkResult status = adapter->imageFormatProperties(
-      pImageInfo->format, pImageInfo->type, Tiling,
-      usage, pImageInfo->flags, formatProps);
+    auto properties = m_device->GetDXVKDevice()->getFormatLimits(
+      pImageInfo->format, pImageInfo->type, Tiling, usage, pImageInfo->flags);
     
-    if (status != VK_SUCCESS)
+    if (!properties)
       return FALSE;
     
-    return (pImageInfo->extent.width  <= formatProps.maxExtent.width)
-        && (pImageInfo->extent.height <= formatProps.maxExtent.height)
-        && (pImageInfo->extent.depth  <= formatProps.maxExtent.depth)
-        && (pImageInfo->numLayers     <= formatProps.maxArrayLayers)
-        && (pImageInfo->mipLevels     <= formatProps.maxMipLevels)
-        && (pImageInfo->sampleCount    & formatProps.sampleCounts);
+    return (pImageInfo->extent.width  <= properties->maxExtent.width)
+        && (pImageInfo->extent.height <= properties->maxExtent.height)
+        && (pImageInfo->extent.depth  <= properties->maxExtent.depth)
+        && (pImageInfo->numLayers     <= properties->maxArrayLayers)
+        && (pImageInfo->mipLevels     <= properties->maxMipLevels)
+        && (pImageInfo->sampleCount    & properties->sampleCounts);
   }
 
 
   BOOL D3D11CommonTexture::CheckFormatFeatureSupport(
           VkFormat              Format,
-          VkFormatFeatureFlags  Features) const {
-    VkFormatProperties properties = m_device->GetDXVKDevice()->adapter()->formatProperties(Format);
+          VkFormatFeatureFlags2 Features) const {
+    DxvkFormatFeatures support = m_device->GetDXVKDevice()->getFormatFeatures(Format);
 
-    return (properties.linearTilingFeatures  & Features) == Features
-        || (properties.optimalTilingFeatures & Features) == Features;
+    return (support.linear  & Features) == Features
+        || (support.optimal & Features) == Features;
   }
   
   
   VkImageUsageFlags D3D11CommonTexture::EnableMetaCopyUsage(
           VkFormat              Format,
           VkImageTiling         Tiling) const {
-    VkFormatFeatureFlags requestedFeatures = 0;
+    VkFormatFeatureFlags2 requestedFeatures = 0;
 
     if (Format == VK_FORMAT_D16_UNORM || Format == VK_FORMAT_D32_SFLOAT) {
-      requestedFeatures |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-                        |  VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+      requestedFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT
+                        |  VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
     }
 
     if (Format == VK_FORMAT_R16_UNORM || Format == VK_FORMAT_R32_SFLOAT) {
-      requestedFeatures |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-                        |  VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+      requestedFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT
+                        |  VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
     }
 
     if (Format == VK_FORMAT_D32_SFLOAT_S8_UINT || Format == VK_FORMAT_D24_UNORM_S8_UINT)
-      requestedFeatures |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+      requestedFeatures |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
 
-    if (requestedFeatures == 0)
+    if (!requestedFeatures)
       return 0;
 
     // Enable usage flags for all supported and requested features
-    VkFormatProperties properties = m_device->GetDXVKDevice()->adapter()->formatProperties(Format);
+    DxvkFormatFeatures support = m_device->GetDXVKDevice()->getFormatFeatures(Format);
 
     requestedFeatures &= Tiling == VK_IMAGE_TILING_OPTIMAL
-      ? properties.optimalTilingFeatures
-      : properties.linearTilingFeatures;
+      ? support.optimal
+      : support.linear;
     
     VkImageUsageFlags requestedUsage = 0;
 
-    if (requestedFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
+    if (requestedFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)
       requestedUsage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     
-    if (requestedFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+    if (requestedFeatures & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)
       requestedUsage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     
-    if (requestedFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+    if (requestedFeatures & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT)
       requestedUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     return requestedUsage;

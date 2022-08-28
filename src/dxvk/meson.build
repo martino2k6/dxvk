@@ -60,7 +60,7 @@ dxvk_shaders = files([
   'hud/shaders/hud_text_vert.vert',
 ])
 
-dxvk_src = files([
+dxvk_src = [
   'dxvk_adapter.cpp',
   'dxvk_barrier.cpp',
   'dxvk_buffer.cpp',
@@ -89,8 +89,6 @@ dxvk_src = files([
   'dxvk_meta_mipgen.cpp',
   'dxvk_meta_pack.cpp',
   'dxvk_meta_resolve.cpp',
-  'dxvk_openvr.cpp',
-  'dxvk_openxr.cpp',
   'dxvk_options.cpp',
   'dxvk_pipelayout.cpp',
   'dxvk_pipemanager.cpp',
@@ -100,6 +98,7 @@ dxvk_src = files([
   'dxvk_shader.cpp',
   'dxvk_shader_key.cpp',
   'dxvk_signal.cpp',
+  'dxvk_sparse.cpp',
   'dxvk_staging.cpp',
   'dxvk_state_cache.cpp',
   'dxvk_stats.cpp',
@@ -107,18 +106,33 @@ dxvk_src = files([
   'dxvk_unbound.cpp',
   'dxvk_util.cpp',
 
-  'platform/dxvk_win32_exts.cpp',
-
   'hud/dxvk_hud.cpp',
   'hud/dxvk_hud_font.cpp',
   'hud/dxvk_hud_item.cpp',
   'hud/dxvk_hud_renderer.cpp',
-])
+]
+
+if platform == 'windows'
+  dxvk_src += [
+    'dxvk_openvr.cpp',
+    'dxvk_openxr.cpp',
+  ]
+endif
+
+if dxvk_wsi == 'win32'
+  dxvk_src += [
+    'platform/dxvk_win32_exts.cpp'
+  ]
+elif dxvk_wsi == 'sdl2'
+  dxvk_src += [
+    'platform/dxvk_sdl2_exts.cpp'
+  ]
+endif
 
 thread_dep = dependency('threads')
 
 dxvk_lib = static_library('dxvk', dxvk_src, glsl_generator.process(dxvk_shaders), dxvk_version,
-  link_with           : [ util_lib, spirv_lib ],
+  link_with           : [ util_lib, spirv_lib, wsi_lib ],
   dependencies        : [ thread_dep, vkcommon_dep ],
   include_directories : [ dxvk_include_path ],
 )

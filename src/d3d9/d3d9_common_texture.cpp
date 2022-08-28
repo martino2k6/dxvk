@@ -4,6 +4,7 @@
 #include "d3d9_device.h"
 
 #include "../util/util_shared_res.h"
+#include "../util/util_win32_compat.h"
 
 #include <algorithm>
 
@@ -68,7 +69,7 @@ namespace dxvk {
       CreateSampleView(0);
 
       if (!IsManaged()) {
-        m_size = m_image->memSize();
+        m_size = m_image->memory().length();
         if (!m_device->ChangeReportedMemory(-m_size))
           throw DxvkError("D3D9: Reporting out of memory from tracking.");
       }
@@ -179,7 +180,11 @@ namespace dxvk {
     return memory.Ptr();
   }
 
-  void D3D9CommonTexture::CreateBufferSubresource(UINT Subresource) {
+  void D3D9CommonTexture::CreateBufferSubresource(UINT Subresource, bool Initialize) {
+    if (likely(m_buffers[Subresource] != nullptr)) {
+      return;
+    }
+
     DxvkBufferCreateInfo info;
     info.size   = GetMipSize(Subresource);
     info.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
@@ -200,6 +205,16 @@ namespace dxvk {
 
     m_buffers[Subresource] = m_device->GetDXVKDevice()->createBuffer(info, memType);
     m_mappedSlices[Subresource] = m_buffers[Subresource]->getSliceHandle();
+
+    if (Initialize) {
+      if (m_data[Subresource]) {
+        m_data[Subresource].Map();
+        memcpy(m_mappedSlices[Subresource].mapPtr, m_data[Subresource].Ptr(), info.size);
+      } else {
+        memset(m_mappedSlices[Subresource].mapPtr, 0, info.size);
+      }
+    }
+    m_data[Subresource] = {};
   }
 
 
@@ -283,21 +298,30 @@ namespace dxvk {
       imageInfo.viewFormats     = m_mapping.Formats;
     }
 
+    const bool hasAttachmentFeedbackLoops =
+      m_device->GetDXVKDevice()->features().extAttachmentFeedbackLoopLayout.attachmentFeedbackLoopLayout;
+    const bool isRT = m_desc.Usage & D3DUSAGE_RENDERTARGET;
+    const bool isDS = m_desc.Usage & D3DUSAGE_DEPTHSTENCIL;
+    const bool isAutoGen = m_desc.Usage & D3DUSAGE_AUTOGENMIPMAP;
+
     // Are we an RT, need to gen mips or an offscreen plain surface?
-    if (m_desc.Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_AUTOGENMIPMAP) || TryOffscreenRT) {
+    if (isRT || isAutoGen || TryOffscreenRT) {
       imageInfo.usage  |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
       imageInfo.stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
       imageInfo.access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
                        |  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     }
 
-    if (m_desc.Usage & D3DUSAGE_DEPTHSTENCIL) {
+    if (isDS) {
       imageInfo.usage  |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
       imageInfo.stages |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
                        |  VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
       imageInfo.access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
                        |  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     }
+
+    if (ResourceType == D3DRTYPE_TEXTURE && (isRT || isDS) && hasAttachmentFeedbackLoops)
+      imageInfo.usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
     if (ResourceType == D3DRTYPE_CUBETEXTURE)
       imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
@@ -370,53 +394,49 @@ namespace dxvk {
   BOOL D3D9CommonTexture::CheckImageSupport(
     const DxvkImageCreateInfo*  pImageInfo,
           VkImageTiling         Tiling) const {
-    const Rc<DxvkAdapter> adapter = m_device->GetDXVKDevice()->adapter();
-    
-    VkImageFormatProperties formatProps = { };
-    
-    VkResult status = adapter->imageFormatProperties(
+    auto properties = m_device->GetDXVKDevice()->getFormatLimits(
       pImageInfo->format, pImageInfo->type, Tiling,
-      pImageInfo->usage, pImageInfo->flags, formatProps);
+      pImageInfo->usage, pImageInfo->flags);
     
-    if (status != VK_SUCCESS)
+    if (!properties)
       return FALSE;
     
-    return (pImageInfo->extent.width  <= formatProps.maxExtent.width)
-        && (pImageInfo->extent.height <= formatProps.maxExtent.height)
-        && (pImageInfo->extent.depth  <= formatProps.maxExtent.depth)
-        && (pImageInfo->numLayers     <= formatProps.maxArrayLayers)
-        && (pImageInfo->mipLevels     <= formatProps.maxMipLevels)
-        && (pImageInfo->sampleCount    & formatProps.sampleCounts);
+    return (pImageInfo->extent.width  <= properties->maxExtent.width)
+        && (pImageInfo->extent.height <= properties->maxExtent.height)
+        && (pImageInfo->extent.depth  <= properties->maxExtent.depth)
+        && (pImageInfo->numLayers     <= properties->maxArrayLayers)
+        && (pImageInfo->mipLevels     <= properties->maxMipLevels)
+        && (pImageInfo->sampleCount    & properties->sampleCounts);
   }
 
 
   VkImageUsageFlags D3D9CommonTexture::EnableMetaCopyUsage(
           VkFormat              Format,
           VkImageTiling         Tiling) const {
-    VkFormatFeatureFlags requestedFeatures = 0;
+    VkFormatFeatureFlags2 requestedFeatures = 0;
 
     if (Format == VK_FORMAT_D16_UNORM || Format == VK_FORMAT_D32_SFLOAT)
-      requestedFeatures |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+      requestedFeatures |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
 
     if (Format == VK_FORMAT_R16_UNORM || Format == VK_FORMAT_R32_SFLOAT)
-      requestedFeatures |=  VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+      requestedFeatures |=  VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
 
-    if (requestedFeatures == 0)
+    if (!requestedFeatures)
       return 0;
 
     // Enable usage flags for all supported and requested features
-    VkFormatProperties properties = m_device->GetDXVKDevice()->adapter()->formatProperties(Format);
+    DxvkFormatFeatures properties = m_device->GetDXVKDevice()->getFormatFeatures(Format);
 
     requestedFeatures &= Tiling == VK_IMAGE_TILING_OPTIMAL
-      ? properties.optimalTilingFeatures
-      : properties.linearTilingFeatures;
+      ? properties.optimal
+      : properties.linear;
     
     VkImageUsageFlags requestedUsage = 0;
     
-    if (requestedFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+    if (requestedFeatures & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)
       requestedUsage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     
-    if (requestedFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+    if (requestedFeatures & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT)
       requestedUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     return requestedUsage;
@@ -636,21 +656,7 @@ namespace dxvk {
     }
   }
 
-  const Rc<DxvkBuffer>&  D3D9CommonTexture::GetBuffer(UINT Subresource, bool Initialize) {
-    if (unlikely(m_buffers[Subresource] == nullptr)) {
-      CreateBufferSubresource(Subresource);
-
-      if (Initialize) {
-        if (m_data[Subresource]) {
-          m_data[Subresource].Map();
-          memcpy(m_mappedSlices[Subresource].mapPtr, m_data[Subresource].Ptr(), GetMipSize(Subresource));
-        } else {
-          memset(m_mappedSlices[Subresource].mapPtr, 0, GetMipSize(Subresource));
-        }
-      }
-      m_data[Subresource] = {};
-    }
-
+  const Rc<DxvkBuffer>&  D3D9CommonTexture::GetBuffer(UINT Subresource) {
     return m_buffers[Subresource];
   }
 

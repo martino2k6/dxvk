@@ -1135,9 +1135,11 @@ namespace dxvk {
 
     bool UseProgrammablePS();
 
+    uint32_t GetAlphaTestPrecision();
+
     void BindAlphaTestState();
 
-    void UpdateAlphaTestSpec(VkCompareOp alphaOp);
+    void UpdateAlphaTestSpec(VkCompareOp alphaOp, uint32_t precision);
     void UpdateVertexBoolSpec(uint32_t value);
     void UpdatePixelBoolSpec(uint32_t value);
     void UpdatePixelShaderSamplerSpec(uint32_t types, uint32_t projections, uint32_t fetch4);
@@ -1261,6 +1263,7 @@ namespace dxvk {
     uint32_t                        m_fetch4        = 0;
 
     uint32_t                        m_lastHazardsDS = 0;
+    uint32_t                        m_lastHazardsRT = 0;
     uint32_t                        m_lastSamplerTypesFF = 0;
 
     D3D9SpecializationInfo          m_specInfo = D3D9SpecializationInfo();

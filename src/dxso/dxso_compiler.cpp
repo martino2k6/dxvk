@@ -488,6 +488,8 @@ namespace dxvk {
 
 
   void DxsoCompiler::emitPsInit() {
+    m_module.enableExtension("SPV_EXT_demote_to_helper_invocation");
+    m_module.enableCapability(spv::CapabilityDemoteToHelperInvocationEXT);
     m_module.enableCapability(spv::CapabilityDerivativeControl);
 
     m_module.setExecutionMode(m_entryPointId,
@@ -509,34 +511,6 @@ namespace dxvk {
       m_module.defFunctionType(
         m_module.defVoidType(), 0, nullptr));
     this->emitFunctionLabel();
-
-    // We may have to defer kill operations to the end of
-    // the shader in order to keep derivatives correct.
-    if (m_analysis->usesKill && m_moduleInfo.options.useDemoteToHelperInvocation) {
-      // This extension basically implements D3D-style discard
-      m_module.enableExtension("SPV_EXT_demote_to_helper_invocation");
-      m_module.enableCapability(spv::CapabilityDemoteToHelperInvocationEXT);
-    }
-    else if (m_analysis->usesKill && m_analysis->usesDerivatives) {
-      m_ps.killState = m_module.newVarInit(
-        m_module.defPointerType(m_module.defBoolType(), spv::StorageClassPrivate),
-        spv::StorageClassPrivate, m_module.constBool(false));
-
-      m_module.setDebugName(m_ps.killState, "ps_kill");
-
-      if (m_moduleInfo.options.useSubgroupOpsForEarlyDiscard) {
-        m_module.enableCapability(spv::CapabilityGroupNonUniform);
-        m_module.enableCapability(spv::CapabilityGroupNonUniformBallot);
-
-        DxsoRegisterInfo laneId;
-        laneId.type = { DxsoScalarType::Uint32, 1, 0 };
-        laneId.sclass = spv::StorageClassInput;
-
-        m_ps.builtinLaneId = emitNewBuiltinVariable(
-          laneId, spv::BuiltInSubgroupLocalInvocationId,
-          "fLaneId", 0);
-      }
-    }
   }
 
 
@@ -2070,18 +2044,18 @@ namespace dxvk {
         DxsoRegMask srcMask(true, true, true, false);
         auto vec3 = emitRegisterLoad(src[0], srcMask);
 
-        DxsoRegisterValue dot = emitDot(vec3, vec3);
-        dot.id = m_module.opInverseSqrt (scalarTypeId, dot.id);
+        // No need for emitDot, either both arguments or none are zero.
+        // mul_zero has the same result as ieee mul.
+        uint32_t dot = m_module.opDot(scalarTypeId, vec3.id, vec3.id);
+        DxsoRegisterValue rcpLength;
+        rcpLength.type = scalarType;
+        rcpLength.id = m_module.opInverseSqrt(scalarTypeId, dot);
         if (m_moduleInfo.options.d3d9FloatEmulation == D3D9FloatEmulation::Enabled) {
-          dot.id = m_module.opNMin        (scalarTypeId, dot.id,
-            m_module.constf32(FLT_MAX));
+          rcpLength.id = m_module.opNMin(scalarTypeId, rcpLength.id, m_module.constf32(FLT_MAX));
         }
 
-        // r * rsq(r . r);
-        result.id = m_module.opVectorTimesScalar(
-          typeId,
-          emitRegisterLoad(src[0], mask).id,
-          dot.id);
+        // r * rsq(r . r)
+        result.id = emitMul(emitRegisterLoad(src[0], mask), emitRegisterExtend(rcpLength, mask.popCount())).id;
         break;
       }
       case DxsoOpcode::SinCos: {
@@ -3105,79 +3079,17 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     if (texReg.type.ccount != 1)
       result = m_module.opAny(m_module.defBoolType(), result);
 
-    if (m_ps.killState == 0) {
-      uint32_t labelIf = m_module.allocateId();
-      uint32_t labelEnd = m_module.allocateId();
+    uint32_t labelIf = m_module.allocateId();
+    uint32_t labelEnd = m_module.allocateId();
 
-      m_module.opSelectionMerge(labelEnd, spv::SelectionControlMaskNone);
-      m_module.opBranchConditional(result, labelIf, labelEnd);
+    m_module.opSelectionMerge(labelEnd, spv::SelectionControlMaskNone);
+    m_module.opBranchConditional(result, labelIf, labelEnd);
 
-      m_module.opLabel(labelIf);
+    m_module.opLabel(labelIf);
+    m_module.opDemoteToHelperInvocation();
+    m_module.opBranch(labelEnd);
 
-      if (m_moduleInfo.options.useDemoteToHelperInvocation) {
-        m_module.opDemoteToHelperInvocation();
-        m_module.opBranch(labelEnd);
-      } else {
-        // OpKill terminates the block
-        m_module.opKill();
-      }
-
-      m_module.opLabel(labelEnd);
-    }
-    else {
-      uint32_t typeId = m_module.defBoolType();
-      
-      uint32_t killState = m_module.opLoad     (typeId, m_ps.killState);
-               killState = m_module.opLogicalOr(typeId, killState, result);
-      m_module.opStore(m_ps.killState, killState);
-
-      if (m_moduleInfo.options.useSubgroupOpsForEarlyDiscard) {
-        uint32_t ballot = m_module.opGroupNonUniformBallot(
-          getVectorTypeId({ DxsoScalarType::Uint32, 4 }),
-          m_module.constu32(spv::ScopeSubgroup),
-          killState);
-        
-        uint32_t laneId = m_module.opLoad(
-          getScalarTypeId(DxsoScalarType::Uint32),
-          m_ps.builtinLaneId);
-
-        uint32_t laneIdPart = m_module.opShiftRightLogical(
-          getScalarTypeId(DxsoScalarType::Uint32),
-          laneId, m_module.constu32(5));
-
-        uint32_t laneMask = m_module.opVectorExtractDynamic(
-          getScalarTypeId(DxsoScalarType::Uint32),
-          ballot, laneIdPart);
-
-        uint32_t laneIdQuad = m_module.opBitwiseAnd(
-          getScalarTypeId(DxsoScalarType::Uint32),
-          laneId, m_module.constu32(0x1c));
-
-        laneMask = m_module.opShiftRightLogical(
-          getScalarTypeId(DxsoScalarType::Uint32),
-          laneMask, laneIdQuad);
-
-        laneMask = m_module.opBitwiseAnd(
-          getScalarTypeId(DxsoScalarType::Uint32),
-          laneMask, m_module.constu32(0xf));
-        
-        uint32_t killSubgroup = m_module.opIEqual(
-          m_module.defBoolType(),
-          laneMask, m_module.constu32(0xf));
-        
-        uint32_t labelIf  = m_module.allocateId();
-        uint32_t labelEnd = m_module.allocateId();
-        
-        m_module.opSelectionMerge(labelEnd, spv::SelectionControlMaskNone);
-        m_module.opBranchConditional(killSubgroup, labelIf, labelEnd);
-        
-        // OpKill terminates the block
-        m_module.opLabel(labelIf);
-        m_module.opKill();
-        
-        m_module.opLabel(labelEnd);
-      }
-    }
+    m_module.opLabel(labelEnd);
   }
 
   void DxsoCompiler::emitTextureDepth(const DxsoInstructionContext& ctx) {
@@ -3694,12 +3606,10 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
   
   void DxsoCompiler::emitPsProcessing() {
-    uint32_t boolType  = m_module.defBoolType();
     uint32_t floatType = m_module.defFloatType(32);
-    uint32_t floatPtr  = m_module.defPointerType(floatType, spv::StorageClassPushConstant);
+    uint32_t uintType  = m_module.defIntType(32, 0);
+    uint32_t uintPtr   = m_module.defPointerType(uintType, spv::StorageClassPushConstant);
     
-    uint32_t alphaFuncId = m_spec.get(m_module, m_specUbo, SpecAlphaCompareOp);
-
     // Implement alpha test and fog
     DxsoRegister color0;
     color0.id = DxsoRegisterId{ DxsoRegisterType::ColorOut, 0 };
@@ -3709,107 +3619,19 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       if (m_programInfo.majorVersion() < 3)
         emitFog();
 
-      // Labels for the alpha test
-      std::array<SpirvSwitchCaseLabel, 8> atestCaseLabels = {{
-        { uint32_t(VK_COMPARE_OP_NEVER),            m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_LESS),             m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_EQUAL),            m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_LESS_OR_EQUAL),    m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_GREATER),          m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_NOT_EQUAL),        m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_GREATER_OR_EQUAL), m_module.allocateId() },
-        { uint32_t(VK_COMPARE_OP_ALWAYS),           m_module.allocateId() },
-      }};
-      
-      uint32_t atestBeginLabel   = m_module.allocateId();
-      uint32_t atestTestLabel    = m_module.allocateId();
-      uint32_t atestDiscardLabel = m_module.allocateId();
-      uint32_t atestKeepLabel    = m_module.allocateId();
-      uint32_t atestSkipLabel    = m_module.allocateId();
-      
-      // if (alpha_func != ALWAYS) { ... }
-      uint32_t isNotAlways = m_module.opINotEqual(boolType, alphaFuncId, m_module.constu32(VK_COMPARE_OP_ALWAYS));
-      m_module.opSelectionMerge(atestSkipLabel, spv::SelectionControlMaskNone);
-      m_module.opBranchConditional(isNotAlways, atestBeginLabel, atestSkipLabel);
-      m_module.opLabel(atestBeginLabel);
-      
-      // Load alpha component
+      uint32_t alphaRefMember = m_module.constu32(uint32_t(D3D9RenderStateItem::AlphaRef));
       uint32_t alphaComponentId = 3;
-      uint32_t alphaId = m_module.opCompositeExtract(floatType,
+
+      D3D9AlphaTestContext alphaTestContext;
+      alphaTestContext.alphaFuncId = m_spec.get(m_module, m_specUbo, SpecAlphaCompareOp);
+      alphaTestContext.alphaPrecisionId = m_spec.get(m_module, m_specUbo, SpecAlphaPrecisionBits);
+      alphaTestContext.alphaRefId = m_module.opLoad(uintType,
+        m_module.opAccessChain(uintPtr, m_rsBlock, 1, &alphaRefMember));
+      alphaTestContext.alphaId = m_module.opCompositeExtract(floatType,
         m_module.opLoad(m_module.defVectorType(floatType, 4), oC0.id),
         1, &alphaComponentId);
 
-      if (m_moduleInfo.options.alphaTestWiggleRoom) {
-        // NV has wonky interpolation of all 1's in a VS -> PS going to 0.999999...
-        // This causes garbage-looking graphics on people's clothing in EverQuest 2 as it does alpha == 1.0.
-
-        // My testing shows the alpha test has a precision of 1/256 for all A8 and below formats,
-        // and around 1 / 2048 for A32F formats and 1 / 4096 for A16F formats (It makes no sense to me too)
-        // so anyway, we're just going to round this to a precision of 1 / 4096 and hopefully this should make things happy
-        // everywhere.
-        const uint32_t alphaSizeId = m_module.constf32(4096.0f);
-
-        alphaId = m_module.opFMul(floatType, alphaId, alphaSizeId);
-        alphaId = m_module.opRound(floatType, alphaId);
-        alphaId = m_module.opFDiv(floatType, alphaId, alphaSizeId);
-      }
-      
-      // Load alpha reference
-      uint32_t alphaRefMember = m_module.constu32(uint32_t(D3D9RenderStateItem::AlphaRef));
-      uint32_t alphaRefId = m_module.opLoad(floatType,
-        m_module.opAccessChain(floatPtr, m_rsBlock, 1, &alphaRefMember));
-      
-      // switch (alpha_func) { ... }
-      m_module.opSelectionMerge(atestTestLabel, spv::SelectionControlMaskNone);
-      m_module.opSwitch(alphaFuncId,
-        atestCaseLabels[uint32_t(VK_COMPARE_OP_ALWAYS)].labelId,
-        atestCaseLabels.size(),
-        atestCaseLabels.data());
-      
-      std::array<SpirvPhiLabel, 8> atestVariables;
-      
-      for (uint32_t i = 0; i < atestCaseLabels.size(); i++) {
-        m_module.opLabel(atestCaseLabels[i].labelId);
-        
-        atestVariables[i].labelId = atestCaseLabels[i].labelId;
-        atestVariables[i].varId   = [&] {
-          switch (VkCompareOp(atestCaseLabels[i].literal)) {
-            case VK_COMPARE_OP_NEVER:            return m_module.constBool(false);
-            case VK_COMPARE_OP_LESS:             return m_module.opFOrdLessThan        (boolType, alphaId, alphaRefId);
-            case VK_COMPARE_OP_EQUAL:            return m_module.opFOrdEqual           (boolType, alphaId, alphaRefId);
-            case VK_COMPARE_OP_LESS_OR_EQUAL:    return m_module.opFOrdLessThanEqual   (boolType, alphaId, alphaRefId);
-            case VK_COMPARE_OP_GREATER:          return m_module.opFOrdGreaterThan     (boolType, alphaId, alphaRefId);
-            case VK_COMPARE_OP_NOT_EQUAL:        return m_module.opFOrdNotEqual        (boolType, alphaId, alphaRefId);
-            case VK_COMPARE_OP_GREATER_OR_EQUAL: return m_module.opFOrdGreaterThanEqual(boolType, alphaId, alphaRefId);
-            default:
-            case VK_COMPARE_OP_ALWAYS:           return m_module.constBool(true);
-          }
-        }();
-        
-        m_module.opBranch(atestTestLabel);
-      }
-      
-      // end switch
-      m_module.opLabel(atestTestLabel);
-      
-      uint32_t atestResult = m_module.opPhi(boolType,
-        atestVariables.size(),
-        atestVariables.data());
-      uint32_t atestDiscard = m_module.opLogicalNot(boolType, atestResult);
-      
-      // if (do_discard) { ... }
-      m_module.opSelectionMerge(atestKeepLabel, spv::SelectionControlMaskNone);
-      m_module.opBranchConditional(atestDiscard, atestDiscardLabel, atestKeepLabel);
-      
-      m_module.opLabel(atestDiscardLabel);
-      m_module.opKill();
-      
-      // end if (do_discard)
-      m_module.opLabel(atestKeepLabel);
-      m_module.opBranch(atestSkipLabel);
-      
-      // end if (alpha_test)
-      m_module.opLabel(atestSkipLabel);
+      DoFixedFunctionAlphaTest(m_module, alphaTestContext);
     }
   }
 
@@ -3889,21 +3711,6 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     m_module.opFunctionCall(
       m_module.defVoidType(),
       m_ps.functionId, 0, nullptr);
-
-    if (m_ps.killState != 0) {
-      uint32_t labelIf  = m_module.allocateId();
-      uint32_t labelEnd = m_module.allocateId();
-      
-      uint32_t killTest = m_module.opLoad(m_module.defBoolType(), m_ps.killState);
-      
-      m_module.opSelectionMerge(labelEnd, spv::SelectionControlMaskNone);
-      m_module.opBranchConditional(killTest, labelIf, labelEnd);
-      
-      m_module.opLabel(labelIf);
-      m_module.opKill();
-      
-      m_module.opLabel(labelEnd);
-    }
 
     // r0 in PS1 is the colour output register. Move r0 -> cO0 here.
     if (m_programInfo.majorVersion() == 1

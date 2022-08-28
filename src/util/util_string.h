@@ -178,9 +178,11 @@ namespace dxvk::str {
   std::wstring tows(const char* mbs);
 
 #ifdef _WIN32
-  inline std::wstring topath(const char* mbs) { return tows(mbs); }
+  using path_string = std::wstring;
+  inline path_string topath(const char* mbs) { return tows(mbs); }
 #else
-  inline std::string  topath(const char* mbs) { return std::string(mbs); }
+  using path_string = std::string;
+  inline path_string topath(const char* mbs) { return std::string(mbs); }
 #endif
   
   inline void format1(std::stringstream&) { }
@@ -205,9 +207,10 @@ namespace dxvk::str {
   }
 
   inline void strlcpy(char* dst, const char* src, size_t count) {
-    std::strncpy(dst, src, count);
-    if (count > 0)
+    if (count > 0) {
+      std::strncpy(dst, src, count - 1);
       dst[count - 1] = '\0';
+    }
   }
   
 }

@@ -15,7 +15,6 @@ namespace dxvk {
   : D3D11DeviceChild<ID3D11DeviceContext4>(pParent),
     m_contextExt(GetTypedContext()),
     m_annotation(GetTypedContext(), Device),
-    m_multithread(this, false),
     m_device    (Device),
     m_flags     (ContextFlags),
     m_staging   (Device, StagingBufferSize),
@@ -59,11 +58,6 @@ namespace dxvk {
     if (riid == __uuidof(ID3DUserDefinedAnnotation)
      || riid == __uuidof(IDXVKUserDefinedAnnotation)) {
       *ppvObject = ref(&m_annotation);
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3D10Multithread)) {
-      *ppvObject = ref(&m_multithread);
       return S_OK;
     }
 
@@ -264,11 +258,6 @@ namespace dxvk {
         dstTexture, &dstLayers, dstOffset,
         srcTexture, &srcLayers, srcOffset,
         srcExtent);
-    } else {
-      Logger::err(str::format(
-        "D3D11: CopySubresourceRegion1: Incompatible resources",
-        "\n  Dst resource type: ", dstResourceDim,
-        "\n  Src resource type: ", srcResourceDim));
     }
   }
 
@@ -288,13 +277,8 @@ namespace dxvk {
     pDstResource->GetType(&dstResourceDim);
     pSrcResource->GetType(&srcResourceDim);
 
-    if (dstResourceDim != srcResourceDim) {
-      Logger::err(str::format(
-        "D3D11: CopyResource: Incompatible resources",
-        "\n  Dst resource type: ", dstResourceDim,
-        "\n  Src resource type: ", srcResourceDim));
+    if (dstResourceDim != srcResourceDim)
       return;
-    }
 
     if (dstResourceDim == D3D11_RESOURCE_DIMENSION_BUFFER) {
       auto dstBuffer = static_cast<D3D11Buffer*>(pDstResource);
@@ -313,10 +297,8 @@ namespace dxvk {
 
       // The subresource count must match as well
       if (dstDesc->ArraySize != srcDesc->ArraySize
-       || dstDesc->MipLevels != srcDesc->MipLevels) {
-        Logger::err("D3D11: CopyResource: Incompatible images");
+       || dstDesc->MipLevels != srcDesc->MipLevels)
         return;
-      }
 
       auto dstFormatInfo = lookupFormatInfo(dstTexture->GetPackedFormat());
       auto srcFormatInfo = lookupFormatInfo(srcTexture->GetPackedFormat());
@@ -837,13 +819,8 @@ namespace dxvk {
     pSrcResource->GetType(&srcResourceType);
 
     if (dstResourceType != D3D11_RESOURCE_DIMENSION_TEXTURE2D
-     || srcResourceType != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-      Logger::err(str::format(
-        "D3D11: ResolveSubresource: Incompatible resources",
-        "\n  Dst resource type: ", dstResourceType,
-        "\n  Src resource type: ", srcResourceType));
+     || srcResourceType != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
       return;
-    }
 
     auto dstTexture = static_cast<D3D11Texture2D*>(pDstResource);
     auto srcTexture = static_cast<D3D11Texture2D*>(pSrcResource);
@@ -854,13 +831,8 @@ namespace dxvk {
     dstTexture->GetDesc(&dstDesc);
     srcTexture->GetDesc(&srcDesc);
 
-    if (dstDesc.SampleDesc.Count != 1) {
-      Logger::err(str::format(
-        "D3D11: ResolveSubresource: Invalid sample counts",
-        "\n  Dst sample count: ", dstDesc.SampleDesc.Count,
-        "\n  Src sample count: ", srcDesc.SampleDesc.Count));
+    if (dstDesc.SampleDesc.Count != 1)
       return;
-    }
 
     D3D11CommonTexture* dstTextureInfo = GetCommonTexture(pDstResource);
     D3D11CommonTexture* srcTextureInfo = GetCommonTexture(pSrcResource);
@@ -2656,27 +2628,107 @@ namespace dxvk {
           ID3D11Buffer*                     pBuffer,
           UINT64                            BufferStartOffsetInBytes,
           UINT                              Flags) {
-    static bool s_errorShown = false;
+    if (!pTiledResource || !pBuffer)
+      return;
 
-    if (!std::exchange(s_errorShown, true))
-      Logger::err("D3D11DeviceContext::CopyTiles: Not implemented");
+    auto buffer = static_cast<D3D11Buffer*>(pBuffer);
+
+    // Get buffer slice and just forward the call
+    VkDeviceSize bufferSize = pTileRegionSize->NumTiles * SparseMemoryPageSize;
+
+    if (buffer->Desc()->ByteWidth < BufferStartOffsetInBytes + bufferSize)
+      return;
+
+    DxvkBufferSlice slice = buffer->GetBufferSlice(BufferStartOffsetInBytes, bufferSize);
+
+    CopyTiledResourceData(pTiledResource,
+      pTileRegionStartCoordinate,
+      pTileRegionSize, slice, Flags);
+
+    if (buffer->HasSequenceNumber())
+      GetTypedContext()->TrackBufferSequenceNumber(buffer);
   }
 
 
   template<typename ContextType>
   HRESULT STDMETHODCALLTYPE D3D11CommonContext<ContextType>::CopyTileMappings(
           ID3D11Resource*                   pDestTiledResource,
-    const D3D11_TILED_RESOURCE_COORDINATE*  pDestRegionStartCoordinate,
+    const D3D11_TILED_RESOURCE_COORDINATE*  pDestRegionCoordinate,
           ID3D11Resource*                   pSourceTiledResource,
-    const D3D11_TILED_RESOURCE_COORDINATE*  pSourceRegionStartCoordinate,
+    const D3D11_TILED_RESOURCE_COORDINATE*  pSourceRegionCoordinate,
     const D3D11_TILE_REGION_SIZE*           pTileRegionSize,
           UINT                              Flags) {
-    static bool s_errorShown = false;
+    if (!pDestTiledResource || !pSourceTiledResource)
+      return E_INVALIDARG;
 
-    if (!std::exchange(s_errorShown, true))
-      Logger::err("D3D11DeviceContext::CopyTileMappings: Not implemented");
+    if constexpr (!IsDeferred)
+      GetTypedContext()->FlushImplicit(false);
 
-    return DXGI_ERROR_INVALID_CALL;
+    DxvkSparseBindInfo bindInfo;
+    bindInfo.dstResource = GetPagedResource(pDestTiledResource);
+    bindInfo.srcResource = GetPagedResource(pSourceTiledResource);
+
+    auto dstPageTable = bindInfo.dstResource->getSparsePageTable();
+    auto srcPageTable = bindInfo.srcResource->getSparsePageTable();
+
+    if (!dstPageTable || !srcPageTable)
+      return E_INVALIDARG;
+
+    if (pDestRegionCoordinate->Subresource >= dstPageTable->getSubresourceCount()
+     || pSourceRegionCoordinate->Subresource >= srcPageTable->getSubresourceCount())
+      return E_INVALIDARG;
+
+    VkOffset3D dstRegionOffset = {
+      int32_t(pDestRegionCoordinate->X),
+      int32_t(pDestRegionCoordinate->Y),
+      int32_t(pDestRegionCoordinate->Z) };
+
+    VkOffset3D srcRegionOffset = {
+      int32_t(pSourceRegionCoordinate->X),
+      int32_t(pSourceRegionCoordinate->Y),
+      int32_t(pSourceRegionCoordinate->Z) };
+
+    VkExtent3D regionExtent = {
+      uint32_t(pTileRegionSize->Width),
+      uint32_t(pTileRegionSize->Height),
+      uint32_t(pTileRegionSize->Depth) };
+
+    for (uint32_t i = 0; i < pTileRegionSize->NumTiles; i++) {
+      // We don't know the current tile mappings of either resource since
+      // this may be called on a deferred context and tile mappings are
+      // updated on the CS thread, so just resolve the copy in the backend
+      uint32_t dstTile = dstPageTable->computePageIndex(
+        pDestRegionCoordinate->Subresource, dstRegionOffset,
+        regionExtent, !pTileRegionSize->bUseBox, i);
+
+      uint32_t srcTile = srcPageTable->computePageIndex(
+        pSourceRegionCoordinate->Subresource, srcRegionOffset,
+        regionExtent, !pTileRegionSize->bUseBox, i);
+
+      if (dstTile >= dstPageTable->getPageCount()
+       || srcTile >= srcPageTable->getPageCount())
+        return E_INVALIDARG;
+
+      DxvkSparseBind bind;
+      bind.mode = DxvkSparseBindMode::Copy;
+      bind.dstPage = dstTile;
+      bind.srcPage = srcTile;
+
+      bindInfo.binds.push_back(bind);
+    }
+
+    DxvkSparseBindFlags flags = (Flags & D3D11_TILE_MAPPING_NO_OVERWRITE)
+      ? DxvkSparseBindFlags(DxvkSparseBindFlag::SkipSynchronization)
+      : DxvkSparseBindFlags();
+
+    EmitCs([
+      cBindInfo = std::move(bindInfo),
+      cFlags    = flags
+    ] (DxvkContext* ctx) {
+      ctx->updatePageTable(cBindInfo, cFlags);
+    });
+
+    return S_OK;
   }
 
 
@@ -2684,12 +2736,24 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11CommonContext<ContextType>::ResizeTilePool(
           ID3D11Buffer*                     pTilePool,
           UINT64                            NewSizeInBytes) {
-    static bool s_errorShown = false;
+    if (NewSizeInBytes % SparseMemoryPageSize)
+      return E_INVALIDARG;
 
-    if (!std::exchange(s_errorShown, true))
-      Logger::err("D3D11DeviceContext::ResizeTilePool: Not implemented");
+    auto buffer = static_cast<D3D11Buffer*>(pTilePool);
 
-    return DXGI_ERROR_INVALID_CALL;
+    if (!buffer->IsTilePool())
+      return E_INVALIDARG;
+
+    // Perform the resize operation. This is somewhat trivialized
+    // since all lifetime tracking is done by the backend.
+    EmitCs([
+      cAllocator  = buffer->GetSparseAllocator(),
+      cPageCount  = NewSizeInBytes / SparseMemoryPageSize
+    ] (DxvkContext* ctx) {
+      cAllocator->setCapacity(cPageCount);
+    });
+
+    return S_OK;
   }
 
 
@@ -2697,28 +2761,177 @@ namespace dxvk {
   void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::TiledResourceBarrier(
           ID3D11DeviceChild*                pTiledResourceOrViewAccessBeforeBarrier,
           ID3D11DeviceChild*                pTiledResourceOrViewAccessAfterBarrier) {
+    DxvkGlobalPipelineBarrier srcBarrier = GetTiledResourceDependency(pTiledResourceOrViewAccessBeforeBarrier);
+    DxvkGlobalPipelineBarrier dstBarrier = GetTiledResourceDependency(pTiledResourceOrViewAccessAfterBarrier);
 
+    if (srcBarrier.stages && dstBarrier.stages) {
+      EmitCs([
+        cSrcBarrier = srcBarrier,
+        cDstBarrier = dstBarrier
+      ] (DxvkContext* ctx) {
+        ctx->emitGraphicsBarrier(
+          cSrcBarrier.stages, cSrcBarrier.access,
+          cDstBarrier.stages, cDstBarrier.access);
+      });
+    }
   }
 
 
   template<typename ContextType>
   HRESULT STDMETHODCALLTYPE D3D11CommonContext<ContextType>::UpdateTileMappings(
           ID3D11Resource*                   pTiledResource,
-          UINT                              NumTiledResourceRegions,
-    const D3D11_TILED_RESOURCE_COORDINATE*  pTiledResourceRegionStartCoordinates,
-    const D3D11_TILE_REGION_SIZE*           pTiledResourceRegionSizes,
+          UINT                              NumRegions,
+    const D3D11_TILED_RESOURCE_COORDINATE*  pRegionCoordinates,
+    const D3D11_TILE_REGION_SIZE*           pRegionSizes,
           ID3D11Buffer*                     pTilePool,
           UINT                              NumRanges,
     const UINT*                             pRangeFlags,
-    const UINT*                             pTilePoolStartOffsets,
+    const UINT*                             pRangeTileOffsets,
     const UINT*                             pRangeTileCounts,
           UINT                              Flags) {
-    bool s_errorShown = false;
+    if (!pTiledResource || !NumRegions || !NumRanges)
+      return E_INVALIDARG;
 
-    if (std::exchange(s_errorShown, true))
-      Logger::err("D3D11DeviceContext::UpdateTileMappings: Not implemented");
+    if constexpr (!IsDeferred)
+      GetTypedContext()->FlushImplicit(false);
 
-    return DXGI_ERROR_INVALID_CALL;
+    // Find sparse allocator if the tile pool is defined
+    DxvkSparseBindInfo bindInfo;
+
+    if (pTilePool) {
+      auto tilePool = static_cast<D3D11Buffer*>(pTilePool);
+      bindInfo.srcAllocator = tilePool->GetSparseAllocator();
+
+      if (bindInfo.srcAllocator == nullptr)
+        return E_INVALIDARG;
+    }
+
+    // Find resource and sparse page table for the given resource
+    bindInfo.dstResource = GetPagedResource(pTiledResource);
+    auto pageTable = bindInfo.dstResource->getSparsePageTable();
+
+    if (!pageTable)
+      return E_INVALIDARG;
+
+    // Lookup table in case the app tries to bind the same
+    // page multiple times. We should resolve that here and
+    // only consider the last bind to any given page.
+    std::vector<uint32_t> bindIndices(pageTable->getPageCount(), ~0u);
+
+    // This function allows pretty much every parameter to be nullptr
+    // in some way, so initialize some defaults as necessary
+    D3D11_TILED_RESOURCE_COORDINATE regionCoord = { };
+    D3D11_TILE_REGION_SIZE regionSize = { };
+
+    if (!pRegionSizes) {
+      regionSize.NumTiles = pRegionCoordinates
+        ? 1 : pageTable->getPageCount();
+    }
+
+    uint32_t rangeFlag = 0u;
+    uint32_t rangeTileOffset = 0u;
+    uint32_t rangeTileCount = ~0u;
+
+    // For now, just generate a simple list of tile index to
+    // page index mappings, and let the backend optimize later
+    uint32_t regionIdx = 0u;
+    uint32_t regionTile = 0u;
+    uint32_t rangeIdx = 0u;
+    uint32_t rangeTile = 0u;
+
+    while (regionIdx < NumRegions && rangeIdx < NumRanges) {
+      if (!regionTile) {
+        if (pRegionCoordinates)
+          regionCoord = pRegionCoordinates[regionIdx];
+
+        if (pRegionSizes)
+          regionSize = pRegionSizes[regionIdx];
+      }
+
+      if (!rangeTile) {
+        if (pRangeFlags)
+          rangeFlag = pRangeFlags[rangeIdx];
+
+        if (pRangeTileOffsets)
+          rangeTileOffset = pRangeTileOffsets[rangeIdx];
+
+        if (pRangeTileCounts)
+          rangeTileCount = pRangeTileCounts[rangeIdx];
+      }
+
+      if (!(rangeFlag & D3D11_TILE_RANGE_SKIP)) {
+        if (regionCoord.Subresource >= pageTable->getSubresourceCount())
+          return E_INVALIDARG;
+
+        if (regionSize.bUseBox && regionSize.NumTiles !=
+            regionSize.Width * regionSize.Height * regionSize.Depth)
+          return E_INVALIDARG;
+
+        VkOffset3D regionOffset = {
+          int32_t(regionCoord.X),
+          int32_t(regionCoord.Y),
+          int32_t(regionCoord.Z) };
+
+        VkExtent3D regionExtent = {
+          uint32_t(regionSize.Width),
+          uint32_t(regionSize.Height),
+          uint32_t(regionSize.Depth) };
+
+        uint32_t resourceTile = pageTable->computePageIndex(regionCoord.Subresource,
+          regionOffset, regionExtent, !regionSize.bUseBox, regionTile);
+
+        // Fill in bind info for the current tile
+        DxvkSparseBind bind = { };
+        bind.dstPage = resourceTile;
+
+        if (rangeFlag & D3D11_TILE_RANGE_NULL) {
+          bind.mode = DxvkSparseBindMode::Null;
+        } else if (pTilePool) {
+          bind.mode = DxvkSparseBindMode::Bind;
+          bind.srcPage = rangeFlag & D3D11_TILE_RANGE_REUSE_SINGLE_TILE
+            ? rangeTileOffset
+            : rangeTileOffset + rangeTile;
+        } else {
+          return E_INVALIDARG;
+        }
+
+        // Add bind info to the bind list, overriding
+        // any existing bind for the same resource page
+        if (resourceTile < pageTable->getPageCount()) {
+          if (bindIndices[resourceTile] < bindInfo.binds.size())
+            bindInfo.binds[bindIndices[resourceTile]] = bind;
+          else
+            bindInfo.binds.push_back(bind);
+        }
+      }
+
+      if (++regionTile == regionSize.NumTiles) {
+        regionTile = 0;
+        regionIdx += 1;
+      }
+
+      if (++rangeTile == rangeTileCount) {
+        rangeTile = 0;
+        rangeIdx += 1;
+      }
+    }
+
+    // Translate flags. The backend benefits from NO_OVERWRITE since
+    // otherwise we have to serialize execution of the current command
+    // buffer, the sparse binding operation, and subsequent commands.
+    // With NO_OVERWRITE, we can execute it more or less asynchronously.
+    DxvkSparseBindFlags flags = (Flags & D3D11_TILE_MAPPING_NO_OVERWRITE)
+      ? DxvkSparseBindFlags(DxvkSparseBindFlag::SkipSynchronization)
+      : DxvkSparseBindFlags();
+
+    EmitCs([
+      cBindInfo = std::move(bindInfo),
+      cFlags    = flags
+    ] (DxvkContext* ctx) {
+      ctx->updatePageTable(cBindInfo, cFlags);
+    });
+
+    return S_OK;
   }
 
 
@@ -2729,10 +2942,25 @@ namespace dxvk {
     const D3D11_TILE_REGION_SIZE*           pDestTileRegionSize,
     const void*                             pSourceTileData,
           UINT                              Flags) {
-    bool s_errorShown = false;
+    if (!pDestTiledResource || !pSourceTileData)
+      return;
 
-    if (std::exchange(s_errorShown, true))
-      Logger::err("D3D11DeviceContext::UpdateTiles: Not implemented");
+    // Allocate staging memory and copy source data into it, at a
+    // 64k page granularity. It is not clear whether this behaviour
+    // is correct in case we're writing to incmplete pages.
+    VkDeviceSize bufferSize = pDestTileRegionSize->NumTiles * SparseMemoryPageSize;
+
+    DxvkBufferSlice slice = AllocStagingBuffer(bufferSize);
+    std::memcpy(slice.mapPtr(0), pSourceTileData, bufferSize);
+
+    // Fix up flags. The runtime probably validates this in some
+    // way but our internal function relies on correct flags anyway.
+    Flags &= D3D11_TILE_MAPPING_NO_OVERWRITE;
+    Flags |= D3D11_TILE_COPY_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE;
+
+    CopyTiledResourceData(pDestTiledResource,
+      pDestTileRegionStartCoordinate,
+      pDestTileRegionSize, slice, Flags);
   }
 
 
@@ -3588,16 +3816,12 @@ namespace dxvk {
     auto dstFormatInfo = lookupFormatInfo(pDstTexture->GetPackedFormat());
     auto srcFormatInfo = lookupFormatInfo(pSrcTexture->GetPackedFormat());
 
-    if (dstFormatInfo->elementSize != srcFormatInfo->elementSize) {
-      Logger::err("D3D11: CopyImage: Incompatible texel size");
+    if (dstFormatInfo->elementSize != srcFormatInfo->elementSize)
       return;
-    }
 
     // Sample counts must match
-    if (pDstTexture->Desc()->SampleDesc.Count != pSrcTexture->Desc()->SampleDesc.Count) {
-      Logger::err("D3D11: CopyImage: Incompatible sample count");
+    if (pDstTexture->Desc()->SampleDesc.Count != pSrcTexture->Desc()->SampleDesc.Count)
       return;
-    }
 
     // Obviously, the copy region must not be empty
     VkExtent3D dstMipExtent = pDstTexture->MipLevelExtent(pDstLayers->mipLevel);
@@ -3615,10 +3839,8 @@ namespace dxvk {
 
     // Don't perform the copy if the offsets aren't block-aligned
     if (!util::isBlockAligned(SrcOffset, srcFormatInfo->blockSize)
-     || !util::isBlockAligned(DstOffset, dstFormatInfo->blockSize)) {
-      Logger::err(str::format("D3D11: CopyImage: Unaligned block offset"));
+     || !util::isBlockAligned(DstOffset, dstFormatInfo->blockSize))
       return;
-    }
 
     // Clamp the image region in order to avoid out-of-bounds access
     VkExtent3D blockCount    = util::computeBlockCount(SrcExtent, srcFormatInfo->blockSize);
@@ -3825,6 +4047,94 @@ namespace dxvk {
 
 
   template<typename ContextType>
+  void D3D11CommonContext<ContextType>::CopyTiledResourceData(
+          ID3D11Resource*                   pResource,
+    const D3D11_TILED_RESOURCE_COORDINATE*  pRegionCoordinate,
+    const D3D11_TILE_REGION_SIZE*           pRegionSize,
+          DxvkBufferSlice                   BufferSlice,
+          UINT                              Flags) {
+    Rc<DxvkPagedResource> resource = GetPagedResource(pResource);
+
+    // Do some validation based on page table properties
+    auto pageTable = resource->getSparsePageTable();
+
+    if (!pageTable)
+      return;
+
+    if (pRegionSize->bUseBox && pRegionSize->NumTiles !=
+        pRegionSize->Width * pRegionSize->Height * pRegionSize->Depth)
+      return;
+
+    if (pRegionSize->NumTiles > pageTable->getPageCount())
+      return;
+
+    // Ignore call if buffer access would be out of bounds
+    VkDeviceSize bufferSize = pRegionSize->NumTiles * SparseMemoryPageSize;
+
+    if (BufferSlice.length() < bufferSize)
+      return;
+
+    // Compute list of tile indices to copy
+    std::vector<uint32_t> tiles(pRegionSize->NumTiles);
+
+    for (uint32_t i = 0; i < pRegionSize->NumTiles; i++) {
+      VkOffset3D regionOffset = {
+        int32_t(pRegionCoordinate->X),
+        int32_t(pRegionCoordinate->Y),
+        int32_t(pRegionCoordinate->Z) };
+
+      VkExtent3D regionExtent = {
+        uint32_t(pRegionSize->Width),
+        uint32_t(pRegionSize->Height),
+        uint32_t(pRegionSize->Depth) };
+
+      uint32_t tile = pageTable->computePageIndex(
+        pRegionCoordinate->Subresource, regionOffset,
+        regionExtent, !pRegionSize->bUseBox, i);
+
+      // Check that the tile is valid and not part of the mip tail
+      auto tileInfo = pageTable->getPageInfo(tile);
+
+      if (tileInfo.type != DxvkSparsePageType::Buffer
+       && tileInfo.type != DxvkSparsePageType::Image)
+        return;
+
+      tiles[i] = tile;
+    }
+
+    // If D3D12 is anything to go by, not passing this flag will trigger
+    // the other code path, regardless of whether TO_LINEAR_BUFFER is set.
+    if (Flags & D3D11_TILE_COPY_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE) {
+      EmitCs([
+        cResource = std::move(resource),
+        cTiles    = std::move(tiles),
+        cBuffer   = std::move(BufferSlice)
+      ] (DxvkContext* ctx) {
+        ctx->copySparsePagesFromBuffer(
+          cResource,
+          cTiles.size(),
+          cTiles.data(),
+          cBuffer.buffer(),
+          cBuffer.offset());
+      });
+    } else {
+      EmitCs([
+        cResource = std::move(resource),
+        cTiles    = std::move(tiles),
+        cBuffer   = std::move(BufferSlice)
+      ] (DxvkContext* ctx) {
+        ctx->copySparsePagesToBuffer(
+          cBuffer.buffer(),
+          cBuffer.offset(),
+          cResource,
+          cTiles.size(),
+          cTiles.data());
+      });
+    }
+  }
+
+
+  template<typename ContextType>
   void D3D11CommonContext<ContextType>::DiscardBuffer(
           ID3D11Resource*                   pResource) {
     auto buffer = static_cast<D3D11Buffer*>(pResource);
@@ -3915,6 +4225,50 @@ namespace dxvk {
       ppSamplers[i] = StartSlot + i < bindings.samplers.size()
         ? ref(bindings.samplers[StartSlot + i])
         : nullptr;
+    }
+  }
+
+
+  template<typename ContextType>
+  DxvkGlobalPipelineBarrier D3D11CommonContext<ContextType>::GetTiledResourceDependency(
+          ID3D11DeviceChild*                pObject) {
+    if (!pObject) {
+      DxvkGlobalPipelineBarrier result;
+      result.stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+      result.access = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+      return result;
+    } else {
+      Com<ID3D11Resource> resource;
+
+      if (FAILED(pObject->QueryInterface(IID_PPV_ARGS(&resource)))) {
+        Com<ID3D11View> view;
+
+        if (FAILED(pObject->QueryInterface(IID_PPV_ARGS(&view))))
+          return DxvkGlobalPipelineBarrier();
+
+        view->GetResource(&resource);
+      }
+
+      D3D11CommonTexture* texture = GetCommonTexture(resource.ptr());
+
+      if (texture) {
+        Rc<DxvkImage> image = texture->GetImage();
+
+        DxvkGlobalPipelineBarrier result;
+        result.stages = image->info().stages;
+        result.access = image->info().access;
+        return result;
+      } else {
+        Rc<DxvkBuffer> buffer = static_cast<D3D11Buffer*>(resource.ptr())->GetBuffer();
+
+        if (buffer == nullptr)
+          return DxvkGlobalPipelineBarrier();
+
+        DxvkGlobalPipelineBarrier result;
+        result.stages = buffer->info().stages;
+        result.access = buffer->info().access;
+        return result;
+      }
     }
   }
 
@@ -4746,10 +5100,8 @@ namespace dxvk {
       extent.depth  = pDstBox->back - pDstBox->front;
     }
 
-    if (!util::isBlockAligned(offset, extent, formatInfo->blockSize, mipExtent)) {
-      Logger::err("D3D11: UpdateSubresource1: Unaligned region");
+    if (!util::isBlockAligned(offset, extent, formatInfo->blockSize, mipExtent))
       return;
-    }
 
     auto stagingSlice = AllocStagingBuffer(util::computeImageDataSize(packedFormat, extent));
 

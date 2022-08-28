@@ -189,8 +189,155 @@ namespace dxvk {
   }
 
 
+  void DoFixedFunctionAlphaTest(SpirvModule& spvModule, const D3D9AlphaTestContext& ctx) {
+    // Labels for the alpha test
+    std::array<SpirvSwitchCaseLabel, 8> atestCaseLabels = {{
+      { uint32_t(VK_COMPARE_OP_NEVER),            spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_LESS),             spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_EQUAL),            spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_LESS_OR_EQUAL),    spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_GREATER),          spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_NOT_EQUAL),        spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_GREATER_OR_EQUAL), spvModule.allocateId() },
+      { uint32_t(VK_COMPARE_OP_ALWAYS),           spvModule.allocateId() },
+    }};
+
+    uint32_t atestBeginLabel   = spvModule.allocateId();
+    uint32_t atestTestLabel    = spvModule.allocateId();
+    uint32_t atestDiscardLabel = spvModule.allocateId();
+    uint32_t atestKeepLabel    = spvModule.allocateId();
+    uint32_t atestSkipLabel    = spvModule.allocateId();
+
+    // if (alpha_func != ALWAYS) { ... }
+    uint32_t boolType = spvModule.defBoolType();
+    uint32_t isNotAlways = spvModule.opINotEqual(boolType, ctx.alphaFuncId, spvModule.constu32(VK_COMPARE_OP_ALWAYS));
+    spvModule.opSelectionMerge(atestSkipLabel, spv::SelectionControlMaskNone);
+    spvModule.opBranchConditional(isNotAlways, atestBeginLabel, atestSkipLabel);
+    spvModule.opLabel(atestBeginLabel);
+
+    // The lower 8 bits of the alpha ref contain the actual reference value
+    // from the API, the upper bits store the accuracy bit count minus 8.
+    // So if we want 12 bits of accuracy (i.e. 0-4095), that value will be 4.
+    uint32_t uintType = spvModule.defIntType(32, 0);
+
+    // Check if the given bit precision is supported
+    uint32_t precisionIntLabel = spvModule.allocateId();
+    uint32_t precisionFloatLabel = spvModule.allocateId();
+    uint32_t precisionEndLabel = spvModule.allocateId();
+
+    uint32_t useIntPrecision = spvModule.opULessThanEqual(boolType,
+      ctx.alphaPrecisionId, spvModule.constu32(8));
+
+    spvModule.opSelectionMerge(precisionEndLabel, spv::SelectionControlMaskNone);
+    spvModule.opBranchConditional(useIntPrecision, precisionIntLabel, precisionFloatLabel);
+    spvModule.opLabel(precisionIntLabel);
+
+    // Adjust alpha ref to the given range
+    uint32_t alphaRefIdInt = spvModule.opBitwiseOr(uintType,
+      spvModule.opShiftLeftLogical(uintType, ctx.alphaRefId, ctx.alphaPrecisionId),
+      spvModule.opShiftRightLogical(uintType, ctx.alphaRefId,
+        spvModule.opISub(uintType, spvModule.constu32(8), ctx.alphaPrecisionId)));
+
+    // Convert alpha ref to float since we'll do the comparison based on that
+    uint32_t floatType = spvModule.defFloatType(32);
+    alphaRefIdInt = spvModule.opConvertUtoF(floatType, alphaRefIdInt);
+
+    // Adjust alpha to the given range and round
+    uint32_t alphaFactorId = spvModule.opISub(uintType,
+      spvModule.opShiftLeftLogical(uintType, spvModule.constu32(256), ctx.alphaPrecisionId),
+      spvModule.constu32(1));
+    alphaFactorId = spvModule.opConvertUtoF(floatType, alphaFactorId);
+
+    uint32_t alphaIdInt = spvModule.opRoundEven(floatType,
+      spvModule.opFMul(floatType, ctx.alphaId, alphaFactorId));
+
+    spvModule.opBranch(precisionEndLabel);
+    spvModule.opLabel(precisionFloatLabel);
+
+    // If we're not using integer precision, normalize the alpha ref
+    uint32_t alphaRefIdFloat = spvModule.opFDiv(floatType,
+      spvModule.opConvertUtoF(floatType, ctx.alphaRefId),
+      spvModule.constf32(255.0f));
+
+    spvModule.opBranch(precisionEndLabel);
+    spvModule.opLabel(precisionEndLabel);
+
+    std::array<SpirvPhiLabel, 2> alphaRefLabels = {
+      SpirvPhiLabel { alphaRefIdInt,    precisionIntLabel   },
+      SpirvPhiLabel { alphaRefIdFloat,  precisionFloatLabel },
+    };
+
+    uint32_t alphaRefId = spvModule.opPhi(floatType,
+      alphaRefLabels.size(),
+      alphaRefLabels.data());
+
+    std::array<SpirvPhiLabel, 2> alphaIdLabels = {
+      SpirvPhiLabel { alphaIdInt,  precisionIntLabel   },
+      SpirvPhiLabel { ctx.alphaId, precisionFloatLabel },
+    };
+
+    uint32_t alphaId = spvModule.opPhi(floatType,
+      alphaIdLabels.size(),
+      alphaIdLabels.data());
+
+    // switch (alpha_func) { ... }
+    spvModule.opSelectionMerge(atestTestLabel, spv::SelectionControlMaskNone);
+    spvModule.opSwitch(ctx.alphaFuncId,
+      atestCaseLabels[uint32_t(VK_COMPARE_OP_ALWAYS)].labelId,
+      atestCaseLabels.size(),
+      atestCaseLabels.data());
+
+    std::array<SpirvPhiLabel, 8> atestVariables;
+
+    for (uint32_t i = 0; i < atestCaseLabels.size(); i++) {
+      spvModule.opLabel(atestCaseLabels[i].labelId);
+
+      atestVariables[i].labelId = atestCaseLabels[i].labelId;
+      atestVariables[i].varId   = [&] {
+        switch (VkCompareOp(atestCaseLabels[i].literal)) {
+          case VK_COMPARE_OP_NEVER:            return spvModule.constBool(false);
+          case VK_COMPARE_OP_LESS:             return spvModule.opFOrdLessThan        (boolType, alphaId, alphaRefId);
+          case VK_COMPARE_OP_EQUAL:            return spvModule.opFOrdEqual           (boolType, alphaId, alphaRefId);
+          case VK_COMPARE_OP_LESS_OR_EQUAL:    return spvModule.opFOrdLessThanEqual   (boolType, alphaId, alphaRefId);
+          case VK_COMPARE_OP_GREATER:          return spvModule.opFOrdGreaterThan     (boolType, alphaId, alphaRefId);
+          case VK_COMPARE_OP_NOT_EQUAL:        return spvModule.opFOrdNotEqual        (boolType, alphaId, alphaRefId);
+          case VK_COMPARE_OP_GREATER_OR_EQUAL: return spvModule.opFOrdGreaterThanEqual(boolType, alphaId, alphaRefId);
+          default:
+          case VK_COMPARE_OP_ALWAYS:           return spvModule.constBool(true);
+        }
+      }();
+
+      spvModule.opBranch(atestTestLabel);
+    }
+
+    // end switch
+    spvModule.opLabel(atestTestLabel);
+
+    uint32_t atestResult = spvModule.opPhi(boolType,
+      atestVariables.size(),
+      atestVariables.data());
+    uint32_t atestDiscard = spvModule.opLogicalNot(boolType, atestResult);
+
+    // if (do_discard) { ... }
+    spvModule.opSelectionMerge(atestKeepLabel, spv::SelectionControlMaskNone);
+    spvModule.opBranchConditional(atestDiscard, atestDiscardLabel, atestKeepLabel);
+
+    spvModule.opLabel(atestDiscardLabel);
+    spvModule.opDemoteToHelperInvocation();
+    spvModule.opBranch(atestKeepLabel);
+
+    // end if (do_discard)
+    spvModule.opLabel(atestKeepLabel);
+    spvModule.opBranch(atestSkipLabel);
+
+    // end if (alpha_test)
+    spvModule.opLabel(atestSkipLabel);
+  }
+
+
   uint32_t SetupRenderStateBlock(SpirvModule& spvModule, uint32_t count) {
     uint32_t floatType = spvModule.defFloatType(32);
+    uint32_t uintType  = spvModule.defIntType(32, 0);
     uint32_t vec3Type  = spvModule.defVectorType(floatType, 3);
 
     std::array<uint32_t, 11> rsMembers = {{
@@ -198,7 +345,8 @@ namespace dxvk {
       floatType,
       floatType,
       floatType,
-      floatType,
+
+      uintType,
 
       floatType,
       floatType,
@@ -2000,6 +2148,8 @@ namespace dxvk {
     m_specUbo = SetupSpecUBO(m_module, m_bindings);
 
     // PS Caps
+    m_module.enableExtension("SPV_EXT_demote_to_helper_invocation");
+    m_module.enableCapability(spv::CapabilityDemoteToHelperInvocationEXT);
     m_module.enableCapability(spv::CapabilityDerivativeControl);
 
     m_module.setExecutionMode(m_entryPointId,
@@ -2220,101 +2370,23 @@ namespace dxvk {
 
 
   void D3D9FFShaderCompiler::alphaTestPS() {
-    // Alpha testing
-    uint32_t boolType = m_module.defBoolType();
-    uint32_t floatPtr = m_module.defPointerType(m_floatType, spv::StorageClassPushConstant);
+    uint32_t uintPtr = m_module.defPointerType(m_uint32Type, spv::StorageClassPushConstant);
 
-    // Declare spec constants for render states
-    uint32_t alphaFuncId = m_spec.get(m_module, m_specUbo, SpecAlphaCompareOp);
-
-    // Implement alpha test
     auto oC0 = m_ps.out.COLOR;
-    // Labels for the alpha test
-    std::array<SpirvSwitchCaseLabel, 8> atestCaseLabels = { {
-      { uint32_t(VK_COMPARE_OP_NEVER),            m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_LESS),             m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_EQUAL),            m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_LESS_OR_EQUAL),    m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_GREATER),          m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_NOT_EQUAL),        m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_GREATER_OR_EQUAL), m_module.allocateId() },
-      { uint32_t(VK_COMPARE_OP_ALWAYS),           m_module.allocateId() },
-    } };
 
-    uint32_t atestBeginLabel = m_module.allocateId();
-    uint32_t atestTestLabel = m_module.allocateId();
-    uint32_t atestDiscardLabel = m_module.allocateId();
-    uint32_t atestKeepLabel = m_module.allocateId();
-    uint32_t atestSkipLabel = m_module.allocateId();
-
-    // if (alpha_test) { ... }
-    uint32_t isNotAlways = m_module.opINotEqual(boolType, alphaFuncId, m_module.constu32(VK_COMPARE_OP_ALWAYS));
-    m_module.opSelectionMerge(atestSkipLabel, spv::SelectionControlMaskNone);
-    m_module.opBranchConditional(isNotAlways, atestBeginLabel, atestSkipLabel);
-    m_module.opLabel(atestBeginLabel);
-
-    // Load alpha component
     uint32_t alphaComponentId = 3;
-    uint32_t alphaId = m_module.opCompositeExtract(m_floatType,
+    uint32_t alphaRefMember = m_module.constu32(uint32_t(D3D9RenderStateItem::AlphaRef));
+
+    D3D9AlphaTestContext alphaTestContext;
+    alphaTestContext.alphaFuncId = m_spec.get(m_module, m_specUbo, SpecAlphaCompareOp);
+    alphaTestContext.alphaPrecisionId = m_spec.get(m_module, m_specUbo, SpecAlphaPrecisionBits);
+    alphaTestContext.alphaRefId = m_module.opLoad(m_uint32Type,
+      m_module.opAccessChain(uintPtr, m_rsBlock, 1, &alphaRefMember));
+    alphaTestContext.alphaId = m_module.opCompositeExtract(m_floatType,
       m_module.opLoad(m_vec4Type, oC0),
       1, &alphaComponentId);
 
-    // Load alpha reference
-    uint32_t alphaRefMember = m_module.constu32(uint32_t(D3D9RenderStateItem::AlphaRef));
-    uint32_t alphaRefId = m_module.opLoad(m_floatType,
-      m_module.opAccessChain(floatPtr, m_rsBlock, 1, &alphaRefMember));
-
-    // switch (alpha_func) { ... }
-    m_module.opSelectionMerge(atestTestLabel, spv::SelectionControlMaskNone);
-    m_module.opSwitch(alphaFuncId,
-      atestCaseLabels[uint32_t(VK_COMPARE_OP_ALWAYS)].labelId,
-      atestCaseLabels.size(),
-      atestCaseLabels.data());
-
-    std::array<SpirvPhiLabel, 8> atestVariables;
-
-    for (uint32_t i = 0; i < atestCaseLabels.size(); i++) {
-      m_module.opLabel(atestCaseLabels[i].labelId);
-
-      atestVariables[i].labelId = atestCaseLabels[i].labelId;
-      atestVariables[i].varId = [&] {
-        switch (VkCompareOp(atestCaseLabels[i].literal)) {
-        case VK_COMPARE_OP_NEVER:            return m_module.constBool(false);
-        case VK_COMPARE_OP_LESS:             return m_module.opFOrdLessThan(boolType, alphaId, alphaRefId);
-        case VK_COMPARE_OP_EQUAL:            return m_module.opFOrdEqual(boolType, alphaId, alphaRefId);
-        case VK_COMPARE_OP_LESS_OR_EQUAL:    return m_module.opFOrdLessThanEqual(boolType, alphaId, alphaRefId);
-        case VK_COMPARE_OP_GREATER:          return m_module.opFOrdGreaterThan(boolType, alphaId, alphaRefId);
-        case VK_COMPARE_OP_NOT_EQUAL:        return m_module.opFOrdNotEqual(boolType, alphaId, alphaRefId);
-        case VK_COMPARE_OP_GREATER_OR_EQUAL: return m_module.opFOrdGreaterThanEqual(boolType, alphaId, alphaRefId);
-        default:
-        case VK_COMPARE_OP_ALWAYS:           return m_module.constBool(true);
-        }
-      }();
-
-      m_module.opBranch(atestTestLabel);
-    }
-
-    // end switch
-    m_module.opLabel(atestTestLabel);
-
-    uint32_t atestResult = m_module.opPhi(boolType,
-      atestVariables.size(),
-      atestVariables.data());
-    uint32_t atestDiscard = m_module.opLogicalNot(boolType, atestResult);
-
-    // if (do_discard) { ... }
-    m_module.opSelectionMerge(atestKeepLabel, spv::SelectionControlMaskNone);
-    m_module.opBranchConditional(atestDiscard, atestDiscardLabel, atestKeepLabel);
-
-    m_module.opLabel(atestDiscardLabel);
-    m_module.opKill();
-
-    // end if (do_discard)
-    m_module.opLabel(atestKeepLabel);
-    m_module.opBranch(atestSkipLabel);
-
-    // end if (alpha_test)
-    m_module.opLabel(atestSkipLabel);
+    DoFixedFunctionAlphaTest(m_module, alphaTestContext);
   }
 
 
@@ -2369,7 +2441,7 @@ namespace dxvk {
 
     if (dumpPath.size() != 0) {
       std::ofstream dumpStream(
-        str::tows(str::format(dumpPath, "/", Name, ".spv").c_str()).c_str(),
+        str::topath(str::format(dumpPath, "/", Name, ".spv").c_str()).c_str(),
         std::ios_base::binary | std::ios_base::trunc);
       
       m_shader->dump(dumpStream);

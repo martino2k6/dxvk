@@ -4,6 +4,7 @@
 #include "dxvk_format.h"
 #include "dxvk_memory.h"
 #include "dxvk_resource.h"
+#include "dxvk_sparse.h"
 #include "dxvk_util.h"
 
 namespace dxvk {
@@ -121,13 +122,13 @@ namespace dxvk {
    * Can be accessed by the host if allocated on a suitable
    * memory type and if created with the linear tiling option.
    */
-  class DxvkImage : public DxvkResource {
+  class DxvkImage : public DxvkPagedResource {
     friend class DxvkContext;
     friend class DxvkImageView;
   public:
     
     DxvkImage(
-      const DxvkDevice*           device,
+            DxvkDevice*           device,
       const DxvkImageCreateInfo&  createInfo,
             DxvkMemoryAllocator&  memAlloc,
             VkMemoryPropertyFlags memFlags);
@@ -141,7 +142,7 @@ namespace dxvk {
      * otherwise some image operations may fail.
      */
     DxvkImage(
-      const DxvkDevice*           device,
+            DxvkDevice*           device,
       const DxvkImageCreateInfo&  info,
             VkImage               image);
     
@@ -162,7 +163,7 @@ namespace dxvk {
     VkImage handle() const {
       return m_image.image;
     }
-    
+
     /**
      * \brief Image properties
      * 
@@ -301,12 +302,11 @@ namespace dxvk {
     }
 
     /**
-     * \brief Memory size
-     * 
-     * \returns The memory size of the image
+     * \brief Memory object
+     * \returns Backing memory
      */
-    VkDeviceSize memSize() const {
-      return m_image.memory.length();
+    const DxvkMemory& memory() const {
+      return m_image.memory;
     }
 
     /**
@@ -337,6 +337,7 @@ namespace dxvk {
     DxvkImageCreateInfo   m_info;
     VkMemoryPropertyFlags m_memFlags;
     DxvkPhysicalImage     m_image;
+
     bool m_shared = false;
 
     small_vector<VkFormat, 4> m_viewFormats;

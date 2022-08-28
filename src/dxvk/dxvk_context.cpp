@@ -64,63 +64,24 @@ namespace dxvk {
   
   void DxvkContext::beginRecording(const Rc<DxvkCommandList>& cmdList) {
     m_cmd = cmdList;
-    m_cmd->beginRecording();
-
-    // Mark all resources as untracked
-    m_vbTracked.clear();
-    m_rcTracked.clear();
-    
-    // The current state of the internal command buffer is
-    // undefined, so we have to bind and set up everything
-    // before any draw or dispatch command is recorded.
-    m_flags.clr(
-      DxvkContextFlag::GpRenderPassBound,
-      DxvkContextFlag::GpXfbActive,
-      DxvkContextFlag::GpIndependentSets);
-    
-    m_flags.set(
-      DxvkContextFlag::GpDirtyFramebuffer,
-      DxvkContextFlag::GpDirtyPipeline,
-      DxvkContextFlag::GpDirtyPipelineState,
-      DxvkContextFlag::GpDirtyVertexBuffers,
-      DxvkContextFlag::GpDirtyIndexBuffer,
-      DxvkContextFlag::GpDirtyXfbBuffers,
-      DxvkContextFlag::GpDirtyBlendConstants,
-      DxvkContextFlag::GpDirtyStencilRef,
-      DxvkContextFlag::GpDirtyRasterizerState,
-      DxvkContextFlag::GpDirtyViewport,
-      DxvkContextFlag::GpDirtyDepthBias,
-      DxvkContextFlag::GpDirtyDepthBounds,
-      DxvkContextFlag::GpDirtyDepthStencilState,
-      DxvkContextFlag::CpDirtyPipelineState,
-      DxvkContextFlag::DirtyDrawBuffer);
-
-    m_descriptorState.dirtyStages(
-      VK_SHADER_STAGE_ALL_GRAPHICS |
-      VK_SHADER_STAGE_COMPUTE_BIT);
-
-    m_state.gp.pipeline = nullptr;
-    m_state.cp.pipeline = nullptr;
+    m_cmd->init();
 
     if (m_descriptorPool == nullptr)
       m_descriptorPool = m_descriptorManager->getDescriptorPool();
+
+    this->beginCurrentCommands();
   }
   
   
   Rc<DxvkCommandList> DxvkContext::endRecording() {
-    this->spillRenderPass(true);
-    this->flushSharedImages();
-
-    m_sdmaBarriers.recordCommands(m_cmd);
-    m_initBarriers.recordCommands(m_cmd);
-    m_execBarriers.recordCommands(m_cmd);
+    this->endCurrentCommands();
 
     if (m_descriptorPool->shouldSubmit(false)) {
       m_cmd->trackDescriptorPool(m_descriptorPool, m_descriptorManager);
       m_descriptorPool = m_descriptorManager->getDescriptorPool();
     }
 
-    m_cmd->endRecording();
+    m_cmd->finalize();
     return std::exchange(m_cmd, nullptr);
   }
 
@@ -135,9 +96,7 @@ namespace dxvk {
 
   void DxvkContext::flushCommandList() {
     m_device->submitCommandList(
-      this->endRecording(),
-      VK_NULL_HANDLE,
-      VK_NULL_HANDLE);
+      this->endRecording());
     
     this->beginRecording(
       m_device->createCommandList());
@@ -1209,9 +1168,34 @@ namespace dxvk {
   }
 
 
+  void DxvkContext::copySparsePagesToBuffer(
+    const Rc<DxvkBuffer>&       dstBuffer,
+          VkDeviceSize          dstOffset,
+    const Rc<DxvkPagedResource>& srcResource,
+          uint32_t              pageCount,
+    const uint32_t*             pages) {
+    this->copySparsePages<true>(
+      srcResource, pageCount, pages,
+      dstBuffer, dstOffset);
+  }
+
+
+  void DxvkContext::copySparsePagesFromBuffer(
+    const Rc<DxvkPagedResource>& dstResource,
+          uint32_t              pageCount,
+    const uint32_t*             pages,
+    const Rc<DxvkBuffer>&       srcBuffer,
+          VkDeviceSize          srcOffset) {
+    this->copySparsePages<false>(
+      dstResource, pageCount, pages,
+      srcBuffer, srcOffset);
+  }
+
+
   void DxvkContext::discardBuffer(
     const Rc<DxvkBuffer>&       buffer) {
-    if (buffer->memFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+    if ((buffer->memFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+     || (buffer->info().flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT))
       return;
 
     if (m_execBarriers.isBufferDirty(buffer->getSliceHandle(), DxvkAccess::Write))
@@ -1539,9 +1523,80 @@ namespace dxvk {
   }
   
   
-  void DxvkContext::emitGraphicsBarrier() {
-    if (!m_barrierControl.test(DxvkBarrierControl::IgnoreGraphicsBarriers))
-      this->spillRenderPass(true);
+  void DxvkContext::initSparseImage(
+    const Rc<DxvkImage>&            image) {
+    auto vk = m_device->vkd();
+
+    // Query sparse memory requirements
+    uint32_t reqCount = 0;
+    vk->vkGetImageSparseMemoryRequirements(vk->device(), image->handle(), &reqCount, nullptr);
+
+    std::vector<VkSparseImageMemoryRequirements> req(reqCount);
+    vk->vkGetImageSparseMemoryRequirements(vk->device(), image->handle(), &reqCount, req.data());
+
+    // Bind metadata aspects. Since the image was just created,
+    // we do not need to interrupt our command list for that.
+    VkDeviceMemory imageMemory = image->memory().memory();
+    VkDeviceSize   imageOffset = image->memory().offset();
+
+    for (const auto& r : req) {
+      if (!(r.formatProperties.aspectMask & VK_IMAGE_ASPECT_METADATA_BIT))
+        continue;
+
+      uint32_t layerCount = (r.formatProperties.flags & VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT)
+        ? 1u : image->info().numLayers;
+
+      for (uint32_t i = 0; i < layerCount; i++) {
+        DxvkSparseImageOpaqueBindKey key;
+        key.image   = image->handle();
+        key.offset  = r.imageMipTailOffset + i * r.imageMipTailStride;
+        key.size    = r.imageMipTailSize;
+        key.flags   = VK_SPARSE_MEMORY_BIND_METADATA_BIT;
+
+        DxvkSparsePageHandle page;
+        page.memory = imageMemory;
+        page.offset = imageOffset;
+        page.length = r.imageMipTailSize;
+
+        m_cmd->bindImageOpaqueMemory(key, page);
+
+        imageOffset += r.imageMipTailSize;
+      }
+    }
+
+    // Perform initial layout transition
+    m_initBarriers.accessImage(image,
+      image->getAvailableSubresources(),
+      VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+      image->info().layout,
+      image->info().stages,
+      image->info().access);
+
+    m_cmd->trackResource<DxvkAccess::Write>(image);
+  }
+
+
+  void DxvkContext::emitGraphicsBarrier(
+          VkPipelineStageFlags      srcStages,
+          VkAccessFlags             srcAccess,
+          VkPipelineStageFlags      dstStages,
+          VkAccessFlags             dstAccess) {
+    // Emit barrier early so we can fold this into
+    // the spill render pass barrier if possible
+    if (srcStages | dstStages) {
+      m_execBarriers.accessMemory(
+        srcStages, srcAccess,
+        dstStages, dstAccess);
+    }
+
+    this->spillRenderPass(true);
+
+    // Flush barriers if there was no active render pass.
+    // This is necessary because there are no resources
+    // associated with the barrier to allow tracking.
+    if (srcStages | dstStages)
+      m_execBarriers.recordCommands(m_cmd);
   }
 
 
@@ -2483,6 +2538,97 @@ namespace dxvk {
   }
   
   
+  void DxvkContext::updatePageTable(
+    const DxvkSparseBindInfo&   bindInfo,
+          DxvkSparseBindFlags   flags) {
+    // Split command buffers here so that we execute
+    // the sparse binding operation at the right time
+    if (!flags.test(DxvkSparseBindFlag::SkipSynchronization))
+      this->splitCommands();
+
+    DxvkSparsePageAllocator* srcAllocator = bindInfo.srcAllocator.ptr();
+    DxvkSparsePageTable* dstPageTable = bindInfo.dstResource->getSparsePageTable();
+    DxvkSparsePageTable* srcPageTable = nullptr;
+
+    if (bindInfo.srcResource != nullptr)
+      srcPageTable = bindInfo.srcResource->getSparsePageTable();
+
+    // In order to support copies properly, we need to buffer the new
+    // mappings first before we apply them to the destination resource.
+    size_t bindCount = bindInfo.binds.size();
+    std::vector<DxvkSparseMapping> mappings(bindCount);
+
+    for (size_t i = 0; i < bindCount; i++) {
+      DxvkSparseBind bind = bindInfo.binds[i];
+
+      switch (bind.mode) {
+        case DxvkSparseBindMode::Null:
+          // The mapping array is already default-initialized
+          // so we don't actually need to do anything here
+          break;
+
+        case DxvkSparseBindMode::Bind:
+          mappings[i] = srcAllocator->acquirePage(bind.srcPage);
+          break;
+
+        case DxvkSparseBindMode::Copy:
+          mappings[i] = srcPageTable->getMapping(bind.srcPage);
+          break;
+      }
+    }
+
+    // Process the actual page table updates here and resolve
+    // our internal structures to Vulkan resource and memory
+    // handles. The rest will be done at submission time.
+    for (size_t i = 0; i < bindCount; i++) {
+      DxvkSparseBind bind = bindInfo.binds[i];
+      DxvkSparseMapping mapping = std::move(mappings[i]);
+
+      DxvkSparsePageInfo pageInfo = dstPageTable->getPageInfo(bind.dstPage);
+
+      switch (pageInfo.type) {
+        case DxvkSparsePageType::None:
+          break;
+
+        case DxvkSparsePageType::Buffer: {
+          DxvkSparseBufferBindKey key;
+          key.buffer = dstPageTable->getBufferHandle();
+          key.offset = pageInfo.buffer.offset;
+          key.size   = pageInfo.buffer.length;
+
+          m_cmd->bindBufferMemory(key, mapping.getHandle());
+        } break;
+
+        case DxvkSparsePageType::Image: {
+          DxvkSparseImageBindKey key;
+          key.image = dstPageTable->getImageHandle();
+          key.subresource = pageInfo.image.subresource;
+          key.offset = pageInfo.image.offset;
+          key.extent = pageInfo.image.extent;
+
+          m_cmd->bindImageMemory(key, mapping.getHandle());
+        } break;
+
+        case DxvkSparsePageType::ImageMipTail: {
+          DxvkSparseImageOpaqueBindKey key;
+          key.image  = dstPageTable->getImageHandle();
+          key.offset = pageInfo.mipTail.resourceOffset;
+          key.size   = pageInfo.mipTail.resourceLength;
+          key.flags  = 0;
+
+          m_cmd->bindImageOpaqueMemory(key, mapping.getHandle());
+        } break;
+      }
+
+      // Update the page table mapping for tracking purposes
+      if (pageInfo.type != DxvkSparsePageType::None)
+        dstPageTable->updateMapping(m_cmd.ptr(), bind.dstPage, std::move(mapping));
+    }
+
+    m_cmd->trackResource<DxvkAccess::Write>(bindInfo.dstResource);
+  }
+
+
   void DxvkContext::signalGpuEvent(const Rc<DxvkGpuEvent>& event) {
     this->spillRenderPass(true);
     
@@ -3655,6 +3801,188 @@ namespace dxvk {
   }
 
 
+  template<bool ToBuffer>
+  void DxvkContext::copySparsePages(
+    const Rc<DxvkPagedResource>& sparse,
+          uint32_t              pageCount,
+    const uint32_t*             pages,
+    const Rc<DxvkBuffer>&       buffer,
+          VkDeviceSize          offset) {
+    auto pageTable = sparse->getSparsePageTable();
+    auto bufferHandle = buffer->getSliceHandle(offset, SparseMemoryPageSize * pageCount);
+
+    if (m_execBarriers.isBufferDirty(bufferHandle,
+        ToBuffer ? DxvkAccess::Write : DxvkAccess::Read))
+      m_execBarriers.recordCommands(m_cmd);
+
+    if (pageTable->getBufferHandle()) {
+      this->copySparseBufferPages<ToBuffer>(
+        static_cast<DxvkBuffer*>(sparse.ptr()),
+        pageCount, pages, buffer, offset);
+    } else {
+      this->copySparseImagePages<ToBuffer>(
+        static_cast<DxvkImage*>(sparse.ptr()),
+        pageCount, pages, buffer, offset);
+    }
+  }
+
+
+  template<bool ToBuffer>
+  void DxvkContext::copySparseBufferPages(
+    const Rc<DxvkBuffer>&       sparse,
+          uint32_t              pageCount,
+    const uint32_t*             pages,
+    const Rc<DxvkBuffer>&       buffer,
+          VkDeviceSize          offset) {
+    std::vector<VkBufferCopy2> regions;
+    regions.reserve(pageCount);
+
+    auto pageTable = sparse->getSparsePageTable();
+
+    auto sparseHandle = sparse->getSliceHandle();
+    auto bufferHandle = buffer->getSliceHandle(offset, SparseMemoryPageSize * pageCount);
+
+    if (m_execBarriers.isBufferDirty(sparseHandle,
+        ToBuffer ? DxvkAccess::Read : DxvkAccess::Write))
+      m_execBarriers.recordCommands(m_cmd);
+
+    for (uint32_t i = 0; i < pageCount; i++) {
+      auto pageInfo = pageTable->getPageInfo(pages[i]);
+
+      if (pageInfo.type == DxvkSparsePageType::Buffer) {
+        VkDeviceSize sparseOffset = pageInfo.buffer.offset;
+        VkDeviceSize bufferOffset = bufferHandle.offset + SparseMemoryPageSize * i;
+
+        VkBufferCopy2 copy = { VK_STRUCTURE_TYPE_BUFFER_COPY_2 };
+        copy.srcOffset = ToBuffer ? sparseOffset : bufferOffset;
+        copy.dstOffset = ToBuffer ? bufferOffset : sparseOffset;
+        copy.size = pageInfo.buffer.length;
+
+        regions.push_back(copy);
+      }
+    }
+
+    VkCopyBufferInfo2 info = { VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2 };
+    info.srcBuffer = ToBuffer ? sparseHandle.handle : bufferHandle.handle;
+    info.dstBuffer = ToBuffer ? bufferHandle.handle : sparseHandle.handle;
+    info.regionCount = uint32_t(regions.size());
+    info.pRegions = regions.data();
+
+    if (info.regionCount)
+      m_cmd->cmdCopyBuffer(DxvkCmdBuffer::ExecBuffer, &info);
+
+    m_execBarriers.accessBuffer(sparseHandle,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      ToBuffer ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
+      sparse->info().stages,
+      sparse->info().access);
+
+    m_execBarriers.accessBuffer(bufferHandle,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      ToBuffer ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT,
+      buffer->info().stages,
+      buffer->info().access);
+
+    m_cmd->trackResource<ToBuffer ? DxvkAccess::Read : DxvkAccess::Write>(sparse);
+    m_cmd->trackResource<ToBuffer ? DxvkAccess::Write : DxvkAccess::Read>(buffer);
+  }
+
+
+  template<bool ToBuffer>
+  void DxvkContext::copySparseImagePages(
+    const Rc<DxvkImage>&        sparse,
+          uint32_t              pageCount,
+    const uint32_t*             pages,
+    const Rc<DxvkBuffer>&       buffer,
+          VkDeviceSize          offset) {
+    std::vector<VkBufferImageCopy2> regions;
+    regions.reserve(pageCount);
+
+    auto pageTable = sparse->getSparsePageTable();
+    auto pageExtent = pageTable->getProperties().pageRegionExtent;
+
+    auto bufferHandle = buffer->getSliceHandle(offset, SparseMemoryPageSize * pageCount);
+    auto sparseSubresources = sparse->getAvailableSubresources();
+
+    if (m_execBarriers.isImageDirty(sparse, sparseSubresources, DxvkAccess::Write))
+      m_execBarriers.recordCommands(m_cmd);
+
+    VkImageLayout transferLayout = sparse->pickLayout(ToBuffer
+      ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+      : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkAccessFlags transferAccess = ToBuffer
+      ? VK_ACCESS_TRANSFER_READ_BIT
+      : VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    if (sparse->info().layout != transferLayout) {
+      m_execAcquires.accessImage(sparse, sparseSubresources,
+        sparse->info().layout,
+        sparse->info().stages, 0,
+        transferLayout,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        transferAccess);
+
+      m_execAcquires.recordCommands(m_cmd);
+    }
+
+    for (uint32_t i = 0; i < pageCount; i++) {
+      auto pageInfo = pageTable->getPageInfo(pages[i]);
+
+      if (pageInfo.type == DxvkSparsePageType::Image) {
+        VkBufferImageCopy2 copy = { VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2 };
+        copy.bufferOffset = bufferHandle.offset + SparseMemoryPageSize * i;
+        copy.bufferRowLength = pageExtent.width;
+        copy.bufferImageHeight = pageExtent.height;
+        copy.imageSubresource = vk::makeSubresourceLayers(pageInfo.image.subresource);
+        copy.imageOffset = pageInfo.image.offset;
+        copy.imageExtent = pageInfo.image.extent;
+
+        regions.push_back(copy);
+      }
+    }
+
+    if (ToBuffer) {
+      VkCopyImageToBufferInfo2 info = { VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2 };
+      info.srcImage = sparse->handle();
+      info.srcImageLayout = transferLayout;
+      info.dstBuffer = bufferHandle.handle;
+      info.regionCount = regions.size();
+      info.pRegions = regions.data();
+
+      if (info.regionCount)
+        m_cmd->cmdCopyImageToBuffer(DxvkCmdBuffer::ExecBuffer, &info);
+    } else {
+      VkCopyBufferToImageInfo2 info = { VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2 };
+      info.srcBuffer = bufferHandle.handle;
+      info.dstImage = sparse->handle();
+      info.dstImageLayout = transferLayout;
+      info.regionCount = regions.size();
+      info.pRegions = regions.data();
+
+      if (info.regionCount)
+        m_cmd->cmdCopyBufferToImage(DxvkCmdBuffer::ExecBuffer, &info);
+    }
+
+    m_execAcquires.accessImage(sparse, sparseSubresources,
+      transferLayout,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      transferAccess,
+      sparse->info().layout,
+      sparse->info().stages,
+      sparse->info().access);
+
+    m_execBarriers.accessBuffer(bufferHandle,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      ToBuffer ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT,
+      buffer->info().stages,
+      buffer->info().access);
+
+    m_cmd->trackResource<ToBuffer ? DxvkAccess::Read : DxvkAccess::Write>(sparse);
+    m_cmd->trackResource<ToBuffer ? DxvkAccess::Write : DxvkAccess::Read>(buffer);
+  }
+
+
   void DxvkContext::resolveImageHw(
     const Rc<DxvkImage>&            dstImage,
     const Rc<DxvkImage>&            srcImage,
@@ -4005,15 +4333,20 @@ namespace dxvk {
     m_cmd->cmdDraw(3, region.dstSubresource.layerCount, 0, 0);
     m_cmd->cmdEndRendering();
 
-    if (srcImage->info().layout != srcLayout) {
-      m_execBarriers.accessImage(
-        srcImage, srcSubresourceRange, srcLayout,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-        srcImage->info().layout,
-        srcImage->info().stages,
-        srcImage->info().access);
-    }
-    
+    m_execBarriers.accessImage(
+      srcImage, srcSubresourceRange, srcLayout,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+      srcImage->info().layout,
+      srcImage->info().stages,
+      srcImage->info().access);
+
+    m_execBarriers.accessImage(
+      dstImage, dstSubresourceRange,
+      dstLayout, dstStages, dstAccess,
+      dstImage->info().layout,
+      dstImage->info().stages,
+      dstImage->info().access);
+
     m_cmd->trackResource<DxvkAccess::Write>(dstImage);
     m_cmd->trackResource<DxvkAccess::Read>(srcImage);
     m_cmd->trackResource<DxvkAccess::None>(views);
@@ -5581,7 +5914,7 @@ namespace dxvk {
             if ((slot.bufferSlice.length())
              && (slot.bufferSlice.bufferInfo().access & storageBufferAccess)) {
               requiresBarrier = this->checkBufferBarrier<DoEmit>(slot.bufferSlice,
-                util::pipelineStages(binding.stages), binding.access);
+                util::pipelineStages(binding.stage), binding.access);
             }
             break;
 
@@ -5591,7 +5924,7 @@ namespace dxvk {
              && (slot.bufferView->bufferInfo().access & storageBufferAccess)) {
               slot.bufferView->updateView();
               requiresBarrier = this->checkBufferViewBarrier<DoEmit>(slot.bufferView,
-                util::pipelineStages(binding.stages), binding.access);
+                util::pipelineStages(binding.stage), binding.access);
             }
             break;
 
@@ -5601,7 +5934,7 @@ namespace dxvk {
             if ((slot.imageView != nullptr)
              && (slot.imageView->imageInfo().access & storageImageAccess)) {
               requiresBarrier = this->checkImageViewBarrier<DoEmit>(slot.imageView,
-                util::pipelineStages(binding.stages), binding.access);
+                util::pipelineStages(binding.stage), binding.access);
             }
             break;
 
@@ -5764,6 +6097,10 @@ namespace dxvk {
     if (buffer->memFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
       return false;
 
+    // Don't discard sparse buffers
+    if (buffer->info().flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      return false;
+
     // Suspend the current render pass if transform feedback is active prior to
     // invalidating the buffer, since otherwise we may invalidate a bound buffer.
     if ((buffer->info().usage & VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT)
@@ -5831,6 +6168,67 @@ namespace dxvk {
       m_descriptorWrites[i].pBufferInfo = &m_descriptors[i].buffer;
       m_descriptorWrites[i].pTexelBufferView = &m_descriptors[i].texelBuffer;
     }
+  }
+
+
+  void DxvkContext::beginCurrentCommands() {
+    // Mark all resources as untracked
+    m_vbTracked.clear();
+    m_rcTracked.clear();
+
+    // The current state of the internal command buffer is
+    // undefined, so we have to bind and set up everything
+    // before any draw or dispatch command is recorded.
+    m_flags.clr(
+      DxvkContextFlag::GpRenderPassBound,
+      DxvkContextFlag::GpXfbActive,
+      DxvkContextFlag::GpIndependentSets);
+
+    m_flags.set(
+      DxvkContextFlag::GpDirtyFramebuffer,
+      DxvkContextFlag::GpDirtyPipeline,
+      DxvkContextFlag::GpDirtyPipelineState,
+      DxvkContextFlag::GpDirtyVertexBuffers,
+      DxvkContextFlag::GpDirtyIndexBuffer,
+      DxvkContextFlag::GpDirtyXfbBuffers,
+      DxvkContextFlag::GpDirtyBlendConstants,
+      DxvkContextFlag::GpDirtyStencilRef,
+      DxvkContextFlag::GpDirtyRasterizerState,
+      DxvkContextFlag::GpDirtyViewport,
+      DxvkContextFlag::GpDirtyDepthBias,
+      DxvkContextFlag::GpDirtyDepthBounds,
+      DxvkContextFlag::GpDirtyDepthStencilState,
+      DxvkContextFlag::CpDirtyPipelineState,
+      DxvkContextFlag::DirtyDrawBuffer);
+
+    m_descriptorState.dirtyStages(
+      VK_SHADER_STAGE_ALL_GRAPHICS |
+      VK_SHADER_STAGE_COMPUTE_BIT);
+
+    m_state.gp.pipeline = nullptr;
+    m_state.cp.pipeline = nullptr;
+  }
+
+
+  void DxvkContext::endCurrentCommands() {
+    this->spillRenderPass(true);
+    this->flushSharedImages();
+
+    m_sdmaBarriers.recordCommands(m_cmd);
+    m_initBarriers.recordCommands(m_cmd);
+    m_execBarriers.recordCommands(m_cmd);
+  }
+
+
+  void DxvkContext::splitCommands() {
+    // This behaves the same as a pair of endRecording and
+    // beginRecording calls, except that we keep the same
+    // command list object for subsequent commands.
+    this->endCurrentCommands();
+
+    m_cmd->next();
+
+    this->beginCurrentCommands();
   }
 
 }

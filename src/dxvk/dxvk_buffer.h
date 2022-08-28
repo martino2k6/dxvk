@@ -8,6 +8,7 @@
 #include "dxvk_hash.h"
 #include "dxvk_memory.h"
 #include "dxvk_resource.h"
+#include "dxvk_sparse.h"
 
 namespace dxvk {
 
@@ -18,6 +19,9 @@ namespace dxvk {
    * passed to \ref DxvkDevice::createBuffer
    */
   struct DxvkBufferCreateInfo {
+    /// Buffer create flags
+    VkBufferCreateFlags flags = 0;
+
     /// Size of the buffer, in bytes
     VkDeviceSize size;
     
@@ -99,7 +103,7 @@ namespace dxvk {
    * unformatted data. Can be accessed by the host
    * if allocated on an appropriate memory type.
    */
-  class DxvkBuffer : public DxvkResource {
+  class DxvkBuffer : public DxvkPagedResource {
     friend class DxvkBufferView;
   public:
     
@@ -289,7 +293,7 @@ namespace dxvk {
       std::unique_lock<sync::Spinlock> swapLock(m_swapMutex);
       m_nextSlices.push_back(slice);
     }
-    
+
   private:
 
     DxvkDevice*             m_device;
@@ -330,6 +334,8 @@ namespace dxvk {
     DxvkBufferHandle allocBuffer(
             VkDeviceSize          sliceCount,
             bool                  clear) const;
+
+    DxvkBufferHandle createSparseBuffer() const;
 
     VkDeviceSize computeSliceAlignment() const;
     

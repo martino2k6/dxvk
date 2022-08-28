@@ -60,25 +60,19 @@ namespace dxvk {
   }
   
   
-  VkFormatProperties DxvkAdapter::formatProperties(VkFormat format) const {
-    VkFormatProperties formatProperties;
-    m_vki->vkGetPhysicalDeviceFormatProperties(m_handle, format, &formatProperties);
-    return formatProperties;
+  DxvkFormatFeatures DxvkAdapter::getFormatFeatures(VkFormat format) const {
+    VkFormatProperties3 properties3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
+    VkFormatProperties2 properties2 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &properties3 };
+    m_vki->vkGetPhysicalDeviceFormatProperties2(m_handle, format, &properties2);
+
+    DxvkFormatFeatures result;
+    result.optimal = properties3.optimalTilingFeatures;
+    result.linear  = properties3.linearTilingFeatures;
+    result.buffer  = properties3.bufferFeatures;
+    return result;
   }
-  
-    
-  VkResult DxvkAdapter::imageFormatProperties(
-    VkFormat                  format,
-    VkImageType               type,
-    VkImageTiling             tiling,
-    VkImageUsageFlags         usage,
-    VkImageCreateFlags        flags,
-    VkImageFormatProperties&  properties) const {
-    return m_vki->vkGetPhysicalDeviceImageFormatProperties(
-      m_handle, format, type, tiling, usage, flags, &properties);
-  }
-  
-    
+
+
   DxvkAdapterQueueIndices DxvkAdapter::findQueueFamilies() const {
     uint32_t graphicsQueue = findQueueFamily(
       VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT,
@@ -97,10 +91,22 @@ namespace dxvk {
     
     if (transferQueue == VK_QUEUE_FAMILY_IGNORED)
       transferQueue = computeQueue;
-    
+
+    uint32_t sparseQueue = VK_QUEUE_FAMILY_IGNORED;
+
+    if (m_queueFamilies[graphicsQueue].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) {
+      // Prefer using the graphics queue as a sparse binding queue
+      sparseQueue = graphicsQueue;
+    } else {
+      sparseQueue = findQueueFamily(
+        VK_QUEUE_SPARSE_BINDING_BIT,
+        VK_QUEUE_SPARSE_BINDING_BIT);
+    }
+
     DxvkAdapterQueueIndices queues;
     queues.graphics = graphicsQueue;
     queues.transfer = transferQueue;
+    queues.sparse = sparseQueue;
     return queues;
   }
 
@@ -350,6 +356,9 @@ namespace dxvk {
     enabledFeatures.vk12.shaderOutputLayer =
       m_deviceFeatures.vk12.shaderOutputLayer;
 
+    // Required for proper GPU synchronization
+    enabledFeatures.vk12.timelineSemaphore = VK_TRUE;
+
     // Only enable the base image robustness feature if robustness 2 isn't
     // supported, since this is only a subset of what we actually want.
     enabledFeatures.vk13.robustImageAccess =
@@ -468,6 +477,7 @@ namespace dxvk {
     DxvkAdapterQueueIndices queueFamilies = findQueueFamilies();
     queueFamiliySet.insert(queueFamilies.graphics);
     queueFamiliySet.insert(queueFamilies.transfer);
+    queueFamiliySet.insert(queueFamilies.sparse);
     this->logQueueFamilies(queueFamilies);
     
     for (uint32_t family : queueFamiliySet) {
@@ -513,7 +523,7 @@ namespace dxvk {
       throw DxvkError("DxvkAdapter: Failed to create device");
     
     return new DxvkDevice(instance, this,
-      new vk::DeviceFn(true, m_vki->instance(), device),
+      new vk::DeviceFn(m_vki, true, device),
       devExtensions, enabledFeatures);
   }
   
@@ -793,25 +803,33 @@ namespace dxvk {
       "\n  vertexPipelineStoresAndAtomics         : ", features.core.features.vertexPipelineStoresAndAtomics ? "1" : "0",
       "\n  fragmentStoresAndAtomics               : ", features.core.features.fragmentStoresAndAtomics ? "1" : "0",
       "\n  shaderImageGatherExtended              : ", features.core.features.shaderImageGatherExtended ? "1" : "0",
-      "\n  shaderStorageImageExtendedFormats      : ", features.core.features.shaderStorageImageExtendedFormats ? "1" : "0",
-      "\n  shaderStorageImageReadWithoutFormat    : ", features.core.features.shaderStorageImageReadWithoutFormat ? "1" : "0",
-      "\n  shaderStorageImageWriteWithoutFormat   : ", features.core.features.shaderStorageImageWriteWithoutFormat ? "1" : "0",
       "\n  shaderClipDistance                     : ", features.core.features.shaderClipDistance ? "1" : "0",
       "\n  shaderCullDistance                     : ", features.core.features.shaderCullDistance ? "1" : "0",
       "\n  shaderFloat64                          : ", features.core.features.shaderFloat64 ? "1" : "0",
       "\n  shaderInt64                            : ", features.core.features.shaderInt64 ? "1" : "0",
       "\n  variableMultisampleRate                : ", features.core.features.variableMultisampleRate ? "1" : "0",
+      "\n  shaderResourceResidency                : ", features.core.features.shaderResourceResidency ? "1" : "0",
+      "\n  shaderResourceMinLod                   : ", features.core.features.shaderResourceMinLod ? "1" : "0",
+      "\n  sparseBinding                          : ", features.core.features.sparseBinding ? "1" : "0",
+      "\n  sparseResidencyBuffer                  : ", features.core.features.sparseResidencyBuffer ? "1" : "0",
+      "\n  sparseResidencyImage2D                 : ", features.core.features.sparseResidencyImage2D ? "1" : "0",
+      "\n  sparseResidencyImage3D                 : ", features.core.features.sparseResidencyImage3D ? "1" : "0",
+      "\n  sparseResidency2Samples                : ", features.core.features.sparseResidency2Samples ? "1" : "0",
+      "\n  sparseResidency4Samples                : ", features.core.features.sparseResidency4Samples ? "1" : "0",
+      "\n  sparseResidency8Samples                : ", features.core.features.sparseResidency8Samples ? "1" : "0",
+      "\n  sparseResidency16Samples               : ", features.core.features.sparseResidency16Samples ? "1" : "0",
+      "\n  sparseResidencyAliased                 : ", features.core.features.sparseResidencyAliased ? "1" : "0",
       "\nVulkan 1.1",
       "\n  shaderDrawParameters                   : ", features.vk11.shaderDrawParameters,
       "\nVulkan 1.2",
       "\n  samplerMirrorClampToEdge               : ", features.vk12.samplerMirrorClampToEdge,
       "\n  drawIndirectCount                      : ", features.vk12.drawIndirectCount,
+      "\n  samplerFilterMinmax                    : ", features.vk12.samplerFilterMinmax,
       "\n  hostQueryReset                         : ", features.vk12.hostQueryReset,
       "\n  timelineSemaphore                      : ", features.vk12.timelineSemaphore,
       "\n  bufferDeviceAddress                    : ", features.vk12.bufferDeviceAddress,
       "\n  shaderOutputViewportIndex              : ", features.vk12.shaderOutputViewportIndex,
       "\n  shaderOutputLayer                      : ", features.vk12.shaderOutputLayer,
-      "\n  timelineSemaphore                      : ", features.vk12.timelineSemaphore,
       "\nVulkan 1.3",
       "\n  robustImageAccess                      : ", features.vk13.robustImageAccess,
       "\n  pipelineCreationCacheControl           : ", features.vk13.pipelineCreationCacheControl,
@@ -850,7 +868,8 @@ namespace dxvk {
   void DxvkAdapter::logQueueFamilies(const DxvkAdapterQueueIndices& queues) {
     Logger::info(str::format("Queue families:",
       "\n  Graphics : ", queues.graphics,
-      "\n  Transfer : ", queues.transfer));
+      "\n  Transfer : ", queues.transfer,
+      "\n  Sparse   : ", queues.sparse != VK_QUEUE_FAMILY_IGNORED ? str::format(queues.sparse) : "n/a"));
   }
   
 }

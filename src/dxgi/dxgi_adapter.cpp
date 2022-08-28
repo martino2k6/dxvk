@@ -11,6 +11,9 @@
 #include "dxgi_output.h"
 
 #include "../util/util_luid.h"
+#include "../util/util_win32_compat.h"
+
+#include "../wsi/wsi_monitor.h"
 
 namespace dxvk {
 
@@ -143,18 +146,12 @@ namespace dxvk {
     if (ppOutput == nullptr)
       return E_INVALIDARG;
     
-    MonitorEnumInfo info;
-    info.iMonitorId = Output;
-    info.oMonitor   = nullptr;
+    HMONITOR monitor = wsi::enumMonitors(Output);
     
-    ::EnumDisplayMonitors(
-      nullptr, nullptr, &MonitorEnumProc,
-      reinterpret_cast<LPARAM>(&info));
-    
-    if (info.oMonitor == nullptr)
+    if (monitor == nullptr)
       return DXGI_ERROR_NOT_FOUND;
     
-    *ppOutput = ref(new DxgiOutput(m_factory, this, info.oMonitor));
+    *ppOutput = ref(new DxgiOutput(m_factory, this, monitor));
     return S_OK;
   }
   
@@ -476,21 +473,6 @@ namespace dxvk {
           SetEvent(pair.second);
       }
     }
-  }
-  
-  
-  BOOL CALLBACK DxgiAdapter::MonitorEnumProc(
-          HMONITOR                  hmon,
-          HDC                       hdc,
-          LPRECT                    rect,
-          LPARAM                    lp) {
-    auto data = reinterpret_cast<MonitorEnumInfo*>(lp);
-    
-    if (data->iMonitorId--)
-      return TRUE; /* continue */
-    
-    data->oMonitor = hmon;
-    return FALSE; /* stop */
   }
   
 }

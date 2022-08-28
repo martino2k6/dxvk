@@ -66,12 +66,20 @@ namespace dxvk {
       return &m_desc;
     }
 
+    BOOL IsTilePool() const {
+      return bool(m_desc.MiscFlags & D3D11_RESOURCE_MISC_TILE_POOL);
+    }
+
     D3D11_COMMON_BUFFER_MAP_MODE GetMapMode() const {
       return m_mapMode;
     }
 
     Rc<DxvkBuffer> GetBuffer() const {
       return m_buffer;
+    }
+
+    Rc<DxvkSparsePageAllocator> GetSparseAllocator() const {
+      return m_sparseAllocator;
     }
     
     DxvkBufferSlice GetBufferSlice() const {
@@ -138,10 +146,12 @@ namespace dxvk {
      * \brief Normalizes buffer description
      * 
      * \param [in] pDesc Buffer description
+     * \param [in] TiledTier Tiled resources tier
      * \returns \c S_OK if the parameters are valid
      */
     static HRESULT NormalizeBufferProperties(
-            D3D11_BUFFER_DESC*      pDesc);
+            D3D11_BUFFER_DESC*      pDesc,
+            D3D11_TILED_RESOURCES_TIER TiledTier);
 
   private:
     
@@ -150,6 +160,7 @@ namespace dxvk {
     
     Rc<DxvkBuffer>                m_buffer;
     Rc<DxvkBuffer>                m_soCounter;
+    Rc<DxvkSparsePageAllocator>   m_sparseAllocator;
     DxvkBufferSliceHandle         m_mapped;
     uint64_t                      m_seq = 0ull;
 
@@ -158,7 +169,7 @@ namespace dxvk {
 
     BOOL CheckFormatFeatureSupport(
             VkFormat              Format,
-            VkFormatFeatureFlags  Features) const;
+            VkFormatFeatureFlags2 Features) const;
     
     VkMemoryPropertyFlags GetMemoryFlags() const;
 
